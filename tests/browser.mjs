@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 const base=process.env.TEST_URL||'http://localhost:4173';
 await mkdir('test-results',{recursive:true});
 const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required']});
-const context=await browser.newContext({viewport:{width:1440,height:1120},acceptDownloads:true,permissions:['microphone'],reducedMotion:'reduce'});
+const context=await browser.newContext({viewport:{width:1440,height:900},acceptDownloads:true,permissions:['microphone'],reducedMotion:'reduce'});
+await context.addInitScript(()=>{window.__sources=[];const source=AudioContext.prototype.createBufferSource;AudioContext.prototype.createBufferSource=function(...args){const node=source.apply(this,args);window.__sources.push(node);return node;};window.__bufferAllocations=0;const original=AudioContext.prototype.createBuffer;AudioContext.prototype.createBuffer=function(...args){window.__bufferAllocations++;return original.apply(this,args);};});
 const page=await context.newPage();const errors=[];
 page.on('pageerror',e=>errors.push(e.message));
 page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
@@ -13,15 +14,50 @@ const pass=name=>{checks.push(name);process.stdout.write(`PASS ${name}\n`);};
 function wav(){const sr=24000,frames=sr*3,b=Buffer.alloc(44+frames*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(sr,24);b.writeUInt32LE(sr*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(frames*2,40);for(let i=0;i<frames;i++){const t=i/sr;const s=t<.15?Math.sin(t*Math.PI*440*2)*Math.exp(-t*20)*.5:0;b.writeInt16LE(Math.round(s*32767),44+i*2);}return b;}
 try{
   await page.goto(base);await page.getByText('Saved on this device',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('slider').count(),13);
+  assert.equal(await page.getByRole('slider').count(),24);
   await page.screenshot({path:'test-results/desktop.png',fullPage:true});
-  pass('Initial desktop studio and 13 accessible controls');
+  pass('Initial desktop studio and 24 accessible controls');
+  for(const size of [{width:1440,height:900},{width:1366,height:768},{width:1280,height:800}]){
+    await page.setViewportSize(size);
+    const cabinet=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth,top:document.querySelector('.instrument').getBoundingClientRect().top,panels:['.mechanical-bay','.control-panel','.tape-recorder','.character-rack','.performance-strip','.master-recorder'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {selector,x:r.x,y:r.y,right:r.right,bottom:r.bottom};})}));
+    assert(cabinet.top<=12,'The cabinet starts immediately below the browser edge');assert(cabinet.scroll<=cabinet.height,`No desktop scrolling at ${size.width}×${size.height}: ${cabinet.scroll}`);assert(cabinet.overflow<=cabinet.width);
+    for(let i=0;i<cabinet.panels.length;i++)for(let j=i+1;j<cabinet.panels.length;j++){const a=cabinet.panels[i],b=cabinet.panels[j];assert(a.right<=b.x+.5||b.right<=a.x+.5||a.bottom<=b.y+.5||b.bottom<=a.y+.5,`Control plates do not overlap: ${a.selector} / ${b.selector}`);}
+    await page.screenshot({path:`test-results/cabinet-${size.width}.png`,fullPage:true});
+  }
+  await page.setViewportSize({width:1440,height:900});
+  const originalTime=await page.getByLabel('Delay time in milliseconds',{exact:true}).inputValue(),originalFeedback=await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow');
+  await page.getByRole('button',{name:'Wander',exact:true}).click();assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');assert.equal(await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow'),originalFeedback);
+  await page.getByRole('button',{name:'Return',exact:true}).click();assert.equal(await page.getByLabel('Delay time in milliseconds',{exact:true}).inputValue(),originalTime);assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Warm space');
+  pass('Entire cabinet fits 1440×900, 1366×768 and 1280×800 without overlap; Wander is reversible');
+
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   const output=await page.locator('.meter-wrap svg').getAttribute('aria-label');assert(!output.includes(' 0 percent'),`Audio must reach meter: ${output}`);
   pass('Starter loops produce real audio');
+  const allocations=await page.evaluate(()=>window.__bufferAllocations);
+  await page.getByLabel('Tape speed',{exact:true}).selectOption('.5');await page.waitForTimeout(120);
+  await page.getByLabel('Tape speed',{exact:true}).selectOption('1');await page.waitForTimeout(120);
+  assert.equal(await page.evaluate(()=>window.__bufferAllocations),allocations,'Changing speed does not reallocate track buffers');
+  pass('Live speed changes reuse audio buffers and keep playback running');
+  await page.getByRole('button',{name:'Loop track 1',exact:true}).click();
+  await page.getByRole('button',{name:'1 beat',exact:true}).click();
+  assert.equal(await page.getByLabel('Loop out',{exact:true}).inputValue(),'0.625');
+  await page.getByRole('button',{name:'Loop tape',exact:true}).click();
+  const nativeLoop=await page.evaluate(()=>window.__sources.slice(-2).map(s=>({loop:s.loop,start:s.loopStart,end:s.loopEnd})));
+  assert(nativeLoop[0].loop);assert.equal(nativeLoop[0].end,.625);assert(!nativeLoop[1].loop);
+  await page.waitForTimeout(750);assert.equal(await page.getByRole('button',{name:'Loop track 1',exact:true}).getAttribute('aria-pressed'),'true');
+  await page.getByRole('button',{name:'Sync',exact:true}).click();await page.getByLabel('Tempo',{exact:true}).fill('120');await page.getByLabel('Tempo',{exact:true}).press('Enter');
+  await page.getByLabel('Delay division',{exact:true}).selectOption('1/8 D');assert.equal(await page.getByLabel('Delay time in milliseconds',{exact:true}).inputValue(),'375');
+  await page.getByLabel('Delay time in milliseconds',{exact:true}).fill('680');await page.getByLabel('Delay time in milliseconds',{exact:true}).press('Enter');assert.equal(await page.getByRole('button',{name:'Free',exact:true}).getAttribute('aria-pressed'),'true');
+  const swell=page.getByRole('button',{name:'Feedback swell',exact:true});await swell.focus();await page.keyboard.down('Space');assert.equal(await swell.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await swell.getAttribute('aria-pressed'),'false');
+  const brake=page.getByRole('button',{name:'Tape brake',exact:true});await brake.focus();await page.keyboard.down('Enter');await page.waitForTimeout(150);assert.equal(await brake.getAttribute('aria-pressed'),'true');await page.keyboard.up('Enter');assert.equal(await brake.getAttribute('aria-pressed'),'false');
+  await page.getByRole('button',{name:'Echo hold',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'true');await page.getByRole('button',{name:'Clear echo',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'false');
+  const send=page.getByRole('slider',{name:'Selected track echo send',exact:true});await send.fill('0.2');
+  const throwButton=page.getByRole('button',{name:'Dub throw',exact:true});await throwButton.focus();await page.keyboard.down('Space');assert.equal(await throwButton.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await send.inputValue(),'0.2');
+  await page.getByLabel('Selected track playback mode',{exact:true}).selectOption('tape');await page.getByRole('button',{name:'Loop tape',exact:true}).click();await send.fill('1');
+  pass('Own track loop uses native A–B timing; tempo sync, numeric delay, brake, swell, hold and dub throw work');
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(500);
   await page.getByLabel('Echo preset',{exact:true}).selectOption('Dub satellite');
-  await page.getByRole('slider',{name:'Repeat rate',exact:true}).focus();await page.keyboard.press('ArrowUp');
+  await page.getByRole('slider',{name:'Delay time',exact:true}).focus();await page.keyboard.press('ArrowUp');
   assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');
   await page.waitForTimeout(700);await page.getByRole('button',{name:'Pause playback',exact:true}).click();await page.waitForTimeout(700);
   await page.getByRole('button',{name:'Stop & save take',exact:false}).click();
@@ -50,8 +86,11 @@ try{
   await page.getByRole('button',{name:'Open recorded takes',exact:true}).click();await page.getByRole('button',{name:'To track 4',exact:true}).click();await page.getByRole('button',{name:'Select track 4: Take 01 bounce',exact:true}).waitFor();
   pass('Sound library and resampling master take to tape');
   await page.getByRole('button',{name:'Undo last track edit',exact:true}).click();
-  await page.getByLabel('Session name',{exact:true}).fill('A saved experiment');await page.waitForTimeout(1000);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'A saved experiment');await page.getByRole('button',{name:'Select track 3: Microphone take + overdub',exact:true}).waitFor();await page.getByRole('button',{name:'Select track 4: Glass bells',exact:true}).waitFor();await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();
-  pass('Session, audio and master take survive reload');
+  await page.getByRole('button',{name:'Loop track 4',exact:true}).click();await page.getByRole('button',{name:'2 beats',exact:true}).click();await page.getByRole('slider',{name:'Selected track echo send',exact:true}).fill('0.3');await page.getByRole('slider',{name:'Selected track pan',exact:true}).fill('-0.4');await page.getByLabel('Session name',{exact:true}).fill('A saved experiment');await page.waitForTimeout(1000);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'A saved experiment');await page.getByRole('button',{name:'Select track 3: Microphone take + overdub',exact:true}).waitFor();await page.getByRole('button',{name:'Select track 4: Glass bells',exact:true}).waitFor();await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Selected track playback mode',{exact:true}).inputValue(),'loop');assert.equal(await page.getByLabel('Loop out',{exact:true}).inputValue(),'1');assert.equal(await page.getByRole('slider',{name:'Selected track echo send',exact:true}).inputValue(),'0.3');assert.equal(await page.getByRole('slider',{name:'Selected track pan',exact:true}).inputValue(),'-0.4');pass('Session, independent loop, pan/send, audio and master take survive reload');
+  const stored=await page.evaluate(async()=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('magnetic-studio');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const tx=db.transaction(['session','clips']);const row=await new Promise(resolve=>{const req=tx.objectStore('session').get('current');req.onsuccess=()=>resolve(req.result);});return {schema:row.schema,embedded:!!row.tracks[0].clip,refs:row.tracks.every(t=>typeof t.clipId==='string'),takes:row.takeIds.length};});
+  assert.equal(stored.schema,2);assert.equal(stored.embedded,false);assert(stored.refs);assert.equal(stored.takes,1);
+  pass('Session controls are saved separately from sample audio');
   await page.getByLabel('Import audio files',{exact:true}).setInputFiles({name:'bad.wav',mimeType:'audio/wav',buffer:Buffer.from('not audio')});await page.getByRole('status').filter({hasText:'This audio format could not be read'}).waitFor();
   pass('Invalid import reports a useful error without replacing audio');
   await page.getByRole('button',{name:'Dismiss message',exact:true}).click();
@@ -61,7 +100,18 @@ try{
   await page.getByRole('button',{name:'Field guide',exact:true}).click();await page.getByText('A small field guide',{exact:true}).waitFor();await page.keyboard.press('Escape');assert.equal(await page.locator('dialog[open]').count(),0);
   await page.waitForFunction(()=>navigator.serviceWorker.controller!==null,undefined,{timeout:15000});await context.setOffline(true);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();await page.getByRole('button',{name:'Play tape from quick controls',exact:true}).click();await page.waitForTimeout(500);assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));await page.getByRole('button',{name:'Pause tape from quick controls',exact:true}).click();
   pass('Installed assets and audio processor work after an offline reload');
-  await context.setOffline(false);await page.setViewportSize({width:1440,height:1120});await page.screenshot({path:'test-results/desktop-verified.png',fullPage:true});
+  const legacyContext=await browser.newContext();const legacy=await legacyContext.newPage();
+  await legacy.route('**/__migration',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><title>Migration fixture</title>'}));
+  await legacy.goto(base+'/__migration');
+  await legacy.evaluate(async wavBytes=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('magnetic-studio',1);req.onupgradeneeded=()=>req.result.createObjectStore('session');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const samples=new Float32Array(24000).fill(.125);const tracks=Array.from({length:4},(_,i)=>({clip:i===0?{name:'Existing sample',channels:[samples,samples],sampleRate:24000}:null,volume:.8,muted:false,solo:false,reversed:false}));const tx=db.transaction('session','readwrite');tx.objectStore('session').put({tracks,params:{},heads:[true,false,true],takes:[{id:'legacy-take',name:'Original master',duration:3,blob:new Blob([new Uint8Array(wavBytes)],{type:'audio/wav'})}],name:'Existing session',speed:1,loop:true,enabled:true,selected:0,preset:'Warm space'},'current');await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});db.close();},Array.from(wav()));
+  await legacy.goto(base);await legacy.getByText('Saved on this device',{exact:true}).waitFor();
+  assert.equal(await legacy.getByLabel('Session name',{exact:true}).inputValue(),'Existing session');
+  await legacy.getByRole('button',{name:'Select track 1: Existing sample',exact:true}).waitFor();
+  await legacy.getByRole('slider',{name:'Intensity',exact:true}).focus();await legacy.keyboard.press('ArrowUp');await legacy.getByText('Saved on this device',{exact:true}).waitFor();
+  await legacy.reload();await legacy.getByText('Saved on this device',{exact:true}).waitFor();await legacy.getByRole('button',{name:'Select track 1: Existing sample',exact:true}).waitFor();
+  const migrationDownload=legacy.waitForEvent('download');await legacy.getByRole('button',{name:'Export latest take as WAV',exact:true}).click();const migrated=await migrationDownload;await migrated.saveAs('test-results/migrated.wav');assert.deepEqual(await readFile('test-results/migrated.wav'),wav());
+  await legacyContext.close();pass('Existing version-one sessions migrate without losing sample audio or recorded WAV bytes');
+  await context.setOffline(false);await page.setViewportSize({width:1440,height:900});await page.screenshot({path:'test-results/desktop-verified.png',fullPage:true});
   assert.deepEqual(errors,[],'No browser errors');pass('No browser errors');
   await writeFile('test-results/results.json',JSON.stringify({checks,audio:{rms,peak:max,sampleRate:bytes.readUInt32LE(24),bytes:bytes.length}},null,2));
 }catch(error){await page.screenshot({path:'test-results/failure.png',fullPage:true}).catch(()=>{});await writeFile('test-results/failure.html',await page.content().catch(()=>''));console.error('Browser errors:',errors);console.error('Offline state:',await page.evaluate(async()=>({text:document.body.innerText.slice(0,700),controller:navigator.serviceWorker.controller?.scriptURL,caches:await caches.keys(),registrations:(await navigator.serviceWorker.getRegistrations()).map(r=>({active:r.active?.state,waiting:r.waiting?.state,installing:r.installing?.state}))})).catch(()=>null));throw error;}finally{await browser.close();}
