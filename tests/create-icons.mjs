@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+import { readFileSync } from 'node:fs';
+const browser = await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
+const page=await browser.newPage({viewport:{width:512,height:512},deviceScaleFactor:1});
+const svg=readFileSync('public/icon.svg','utf8');
+await page.setContent(`<style>*{margin:0}body{background:#232a25;width:100vw;height:100vh;display:grid;place-items:center}svg{width:100%;height:100%}</style>${svg}`);
+await page.screenshot({path:'public/icon-512.png'});
+await page.setViewportSize({width:192,height:192});
+await page.screenshot({path:'public/icon-192.png'});
+await page.setViewportSize({width:512,height:512});
+await page.addStyleTag({content:'svg{width:74%;height:74%}'});
+await page.screenshot({path:'public/icon-maskable.png'});
+await browser.close();

@@ -1,0 +1,13 @@
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const processors={};
+const sandbox={sampleRate:48000,Float32Array,Math,AudioWorkletProcessor:class{constructor(){this.port={onmessage:null,postMessage(){}};}},registerProcessor:(name,Processor)=>{processors[name]=Processor;}};
+vm.runInNewContext(readFileSync('public/audio/tape-processor.js','utf8'),sandbox);
+const Tape=processors['magnetic-tape'];
+function render(heads,feedback=0,enabled=1,blocks=400){const processor=new Tape();processor.heads=heads;processor.headLevels=[...heads];const p={};for(const param of Tape.parameterDescriptors)p[param.name]=new Float32Array([param.defaultValue]);p.feedback[0]=feedback;p.mix[0]=1;p.enabled[0]=enabled;p.wow[0]=0;p.drive[0]=.5;const output=new Float32Array(blocks*128);for(let block=0;block<blocks;block++){const input=[new Float32Array(128),new Float32Array(128)],out=[new Float32Array(128),new Float32Array(128)];if(block===0){input[0][0]=.5;input[1][0]=.5;}processor.process([input],[out],p);output.set(out[0],block*128);}return output;}
+for(let head=0;head<3;head++){const heads=[0,0,0];heads[head]=1;const out=render(heads);let max=0,index=0;for(let i=0;i<out.length;i++)if(Math.abs(out[i])>max){max=Math.abs(out[i]);index=i;}assert(Math.abs(index-48000*.22*(head+1))<2,`Head ${head+1} delay: ${index}`);assert(max>.05);}
+process.stdout.write('PASS Three playback heads arrive at 220 / 440 / 660 ms\n');
+const bypass=render([1,1,1],.6,0);assert(Math.abs(bypass[0]-.5)<1e-6);assert(bypass.slice(1).every(x=>x===0));process.stdout.write('PASS Bypass preserves dry signal without echo\n');
+const feedback=render([1,1,1],1.08,1,3000);assert(feedback.every(Number.isFinite));assert(feedback.every(x=>Math.abs(x)<1));process.stdout.write('PASS Maximum feedback remains finite and bounded over eight seconds\n');
+const Capture=processors['magnetic-capture'];const capture=new Capture();const messages=[];capture.port.postMessage=message=>messages.push(message);capture.port.onmessage({data:'start'});for(let i=0;i<70;i++){const input=[new Float32Array(128).fill(.25),new Float32Array(128).fill(-.1)];capture.process([input],[[new Float32Array(128),new Float32Array(128)]]);}capture.port.onmessage({data:'stop'});assert.equal(messages.filter(m=>m.type==='chunk').reduce((n,m)=>n+m.left.length,0),70*128);assert.equal(messages.at(-1).type,'done');assert.equal(messages.at(-1).frames,70*128);assert(messages.filter(m=>m.type==='chunk').every(m=>m.left.every(v=>v===.25)));process.stdout.write('PASS PCM recorder flushes complete and partial chunks before stop acknowledgement\n');
