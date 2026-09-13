@@ -7,7 +7,7 @@ vm.runInNewContext(ts.transpileModule(readFileSync('src/audio.ts','utf8'),{compi
 const param=()=>({value:1,setValueAtTime(v){this.value=v;},linearRampToValueAtTime(v){this.value=v;},cancelScheduledValues(){},setTargetAtTime(v){this.value=v;}});
 let allocations=0;
 const ctx={currentTime:0,createBuffer(c,n,sr){allocations++;const channels=Array.from({length:c},()=>new Float32Array(n));return {duration:n/sr,getChannelData:c=>channels[c]};},createGain(){return {gain:param(),connect(){},disconnect(){}};},createBufferSource(){return {playbackRate:param(),connect(){},disconnect(){},start(at,offset){this.at=at;this.offset=offset;},stop(){}};}};
-const engine=new exported.TapeEngine();engine.ctx=ctx;engine.init=async()=>{};
+const engine=new exported.TapeEngine();assert(engine.tracks.every(t=>t.clip===null),'New sessions start empty');engine.tracks[0].clip=exported.createDemo('Soft keys');engine.tracks[1].clip=exported.createDemo('Dusty drums');engine.ctx=ctx;engine.init=async()=>{};
 engine.tracks[0].mode='loop';engine.tracks[0].loopStart=.2;engine.tracks[0].loopEnd=.9;
 engine.tracks[1].mode='loop';engine.tracks[1].loopStart=1;engine.tracks[1].loopEnd=2.1;
 engine.loop=false;
@@ -23,7 +23,11 @@ engine.setLoopBounds(0,.15,.6);assert.equal(engine.tracks[0].mode,'loop');engine
 engine.setTempo(120,'1/8 D',true);assert.equal(engine.params.time,.375);engine.setTempo(40,'1/2',true);assert.equal(engine.params.time,1.5);engine.setParam('time',.65);assert(!engine.sync);assert.equal(engine.params.time,.65);
 console.log('PASS Independent loop phase, A–B bounds, one shots, speed/brake, undo and tempo conversion');
 
-const looping=new exported.TapeEngine();looping.ctx=ctx;looping.init=async()=>{};looping.tracks[0].mode='loop';looping.tracks[0].loopStart=.2;looping.tracks[0].loopEnd=.9;await looping.play();ctx.currentTime=looping.startedAt+23.7;
+const looping=new exported.TapeEngine();looping.tracks[0].clip=exported.createDemo('Soft keys');looping.tracks[1].clip=exported.createDemo('Dusty drums');looping.ctx=ctx;looping.init=async()=>{};looping.tracks[0].mode='loop';looping.tracks[0].loopStart=.2;looping.tracks[0].loopEnd=.9;await looping.play();ctx.currentTime=looping.startedAt+23.7;
 const phase=looping.trackPosition(0);looping.setClip(2,exported.createDemo('Sub pulse'));assert(Math.abs(looping.trackPosition(0)-phase)<1e-7,'Loading another track preserves independent loop phase after multiple tape laps');
-looping.toggleLoop();assert.equal(looping.sources.length,3,'Disabling whole-tape looping lets ordinary tracks finish their current lap');assert(Math.abs(looping.sources[1].node.offset-3.7)<1e-7);assert(Math.abs(looping.trackPosition(0)-phase)<1e-7);
+looping.toggleLoop();assert.equal(looping.sources.length,3,'Disabling whole-tape looping lets ordinary tracks finish their current lap');assert(Math.abs(looping.sources[1].node.offset-3.725)<1e-7);assert(Math.abs(looping.trackPosition(0)-phase)<1e-7);
 console.log('PASS Imports and global loop changes preserve independent loops and finish the current tape lap');
+
+const h2=engine.headTimes[1];engine.setHeadTime(2,1.23);engine.setHeadTime(0,.18);assert.equal(engine.headTimes[1],h2);assert.equal(engine.headTimes[2],1.23);engine.setHeadSync(1,true,'1/4 D');engine.setTempo(100);assert(Math.abs(engine.headTimes[1]-.9)<1e-10);assert.equal(engine.headTimes[2],1.23);engine.setHeadTime(1,.72);assert.equal(engine.headTiming[0].sync,false);
+const existingSource=looping.sources.find(s=>s.index===0).node;const pBefore=looping.trackPosition(0);looping.setClip(3,{name:'Long sample',sampleRate:24000,channels:[new Float32Array(24000*30),new Float32Array(24000*30)]});assert.equal(looping.sources.find(s=>s.index===0).node,existingSource,'Imports leave independent loops running');assert.equal(looping.trackPosition(0),pBefore);looping.setClip(3,null);assert.equal(looping.sources.find(s=>s.index===0).node,existingSource,'Deleting another track leaves independent loops running');
+console.log('PASS Independent head times and tempo, empty startup, uninterrupted loops across loading/deleting longer files');

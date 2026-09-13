@@ -1,5 +1,5 @@
-import type {Clip, Parameters, Take, Track} from './audio';
-export type Session = {tracks:Track[];params:Parameters;heads:boolean[];takes:Take[];name:string;speed:number;loop:boolean;enabled:boolean;selected:number;preset:string;bpm?:number;sync?:boolean;division?:string};
+import type {Clip, Parameters, Take, Track, HeadTiming, CloudParameters} from './audio';
+export type Session = {tracks:Track[];params:Parameters;heads:boolean[];takes:Take[];name:string;speed:number;loop:boolean;enabled:boolean;selected:number;preset:string;bpm?:number;sync?:boolean;division?:string;headTiming?:HeadTiming[];cloud?:CloudParameters};
 type StoredSession = Omit<Session,'tracks'|'takes'> & {schema:2;tracks:(Omit<Track,'clip'>&{clipId:string|null})[];takeIds:string[]};
 let dbPromise:Promise<IDBDatabase>|null=null;
 const clipIds=new WeakMap<Clip,string>();
@@ -25,7 +25,7 @@ export async function saveSession(session:Session){
   const tracks=session.tracks.map(({clip,...track})=>{let clipId:string|null=null;if(clip){clipId=clipIds.get(clip)||crypto.randomUUID();clipIds.set(clip,clipId);clips.set(clipId,clip);}return {...track,clipId};});
   const {takes,tracks:originalTracks,...values}=session;
   const savedTakes=[...takes];
-  const stored:StoredSession={...values,params:{...session.params},heads:[...session.heads],tracks,schema:2,takeIds:savedTakes.map(t=>t.id)};
+  const stored:StoredSession={...values,params:{...session.params},heads:[...session.heads],headTiming:session.headTiming?.map(h=>({...h})),cloud:session.cloud?{...session.cloud}:undefined,tracks,schema:2,takeIds:savedTakes.map(t=>t.id)};
   const database=await db();
   await new Promise<void>((resolve,reject)=>{
     const tx=database.transaction(['session','clips','takes'],'readwrite');

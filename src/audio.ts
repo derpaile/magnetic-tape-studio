@@ -3,8 +3,14 @@ export type Track = { clip: Clip | null; volume: number; muted: boolean; solo: b
 export const TRACK_DEFAULTS = {mode:'tape' as const,loopStart:0,loopEnd:0,pan:0,send:1};
 export type Parameters = { time: number; feedback: number; mix: number; age: number; wow: number; flutter: number; drive: number; tone: number; reverb: number; volume: number; hiss: number; crinkle: number; lowCut: number; spread: number; space: number; decay: number };
 export type Take = { id: string; name: string; blob: Blob; duration: number };
+export const MASTER_LIMIT = 30 * 60;
+export type HeadTiming = {time:number;sync:boolean;division:string};
+export type CloudParameters = {dissolve:number;grainSize:number;memory:number;scatter:number;wander:number;return:number};
+export const CLOUD_DEFAULTS:CloudParameters = {dissolve:0,grainSize:.24,memory:1.5,scatter:.35,wander:.15,return:0};
+export const CLOUD_RANGES:Record<keyof CloudParameters,[number,number]> = {dissolve:[0,1],grainSize:[.08,.8],memory:[.1,10],scatter:[0,1],wander:[0,1],return:[0,.7]};
+export type CloudVisual = {peaks:number[];grains:{x:number;life:number}[];filled:number;hold:boolean;motion:'idle'|'record'|'play';motionDuration:number;values:number[]};
 export const DEFAULTS: Parameters = {time:.22,feedback:.43,mix:.35,age:.4,wow:.35,flutter:.2,drive:.38,tone:.55,reverb:.18,volume:.75,hiss:.08,crinkle:.12,lowCut:120,spread:.45,space:.12,decay:6};
-export const DIVISIONS: Record<string,number> = {'1/16':.25,'1/8 T':1/3,'1/8':.5,'1/8 D':.75,'1/4':1,'1/4 D':1.5,'1/2':2};
+export const DIVISIONS: Record<string,number> = {'1/16':.25,'1/8 T':1/3,'1/8':.5,'1/8 D':.75,'1/4':1,'1/4 D':1.5,'1/2':2,'1/2 D':3,'1/1':4};
 export const PRESETS: Record<string, {params: Parameters; heads: boolean[]}> = {
   'Warm space': {params: DEFAULTS, heads:[true,false,true]},
   'Dub satellite': {params:{...DEFAULTS,time:.3125,feedback:.79,mix:.52,age:.62,drive:.55,lowCut:260,spread:.8,reverb:.3},heads:[false,true,true]},
@@ -61,23 +67,27 @@ function joinChunks(chunks: Float32Array[]) {
 }
 export class TapeEngine {
   ctx: AudioContext | null = null;
-  tracks: Track[] = ['Soft keys','Dusty drums',null,null].map(name=>({clip:name?createDemo(name):null,volume:name==='Dusty drums'?.6:.8,muted:false,solo:false,reversed:false,...TRACK_DEFAULTS}));
+  tracks: Track[] = Array.from({length:4},()=>({clip:null,volume:.8,muted:false,solo:false,reversed:false,...TRACK_DEFAULTS}));
   params: Parameters = {...DEFAULTS}; heads=[true,false,true]; enabled=true; speed=1; loop=true; bpm=96; sync=false; division='1/8';
+  headTiming:HeadTiming[] = [{time:.44,sync:false,division:'1/4'},{time:.66,sync:false,division:'1/4 D'}];
+  cloud:CloudParameters = {...CLOUD_DEFAULTS}; cloudHolding=false;
+  cloudVisual:CloudVisual = {peaks:[],grains:[],filled:0,hold:false,motion:'idle',motionDuration:0,values:Object.values(CLOUD_DEFAULTS)};
   holding=false; inputCut=false; swelling=false; braking=false; throwing=-1; private motorSpeed=1; private tapeOrigin=0; private taps:number[]=[];
-  playing=false; recording=false; micRecording=false; micArming=false; monitoring=false; overdub=false;
+  playing=false; recording=false; masterSaving=false; micRecording=false; micArming=false; monitoring=false; overdub=false;
   position=0; startedAt=0; recordingStarted=0; micStarted=0;
   takes: Take[]=[]; selected=0; onChange:()=>void=()=>{}; onNotice:(s:string)=>void=()=>{};
-  private sources: {node:AudioBufferSourceNode;fade:GainNode}[]=[]; private gains: GainNode[]=[]; private sends: GainNode[]=[]; private pans: StereoPannerNode[]=[];
+  private sources: {node:AudioBufferSourceNode;fade:GainNode;index:number}[]=[]; private gains: GainNode[]=[]; private sends: GainNode[]=[]; private pans: StereoPannerNode[]=[];
   private input!: GainNode; private echoInput!: GainNode; private spaceNode!: AudioWorkletNode; private spaceGain!: GainNode; private spring!:ConvolverNode; private tape!: AudioWorkletNode; private reverbGain!: GainNode; private master!: GainNode;
   analyser!: AnalyserNode; private capture!: AudioWorkletNode;
   private micStream: MediaStream|null=null; private micSource: MediaStreamAudioSourceNode|null=null; private micCapture:AudioWorkletNode|null=null; private micSilent:GainNode|null=null;
-  private masterChunks:Float32Array[][]=[[],[]]; private micChunks:Float32Array[][]=[[],[]];
+  private recorder!:Worker; private micChunks:Float32Array[][]=[[],[]];
   private initPromise:Promise<void>|null=null; private stopResolve:(()=>void)|null=null; private micResolve:(()=>void)|null=null;
   private undoStack: {index:number;track:Track}[]=[]; private micTarget=0; private micOffset=0; private micRate=1; private micOverdub=false;
   private bufferCache=new WeakMap<Clip,{key:string;buffer:AudioBuffer}>();
   private speedRamp:{from:number;to:number;at:number;duration:number}|null=null;
   private masterStopPromise:Promise<void>|null=null;
   private micStopPromise:Promise<void>|null=null;
+  get headTimes(){return [this.params.time,...this.headTiming.map(h=>h.time)];}
   get duration(){return Math.max(1,...this.tracks.map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0));}
   get hasUndo(){return this.undoStack.length>0;}
   get repeats(){return this.loop||this.tracks.some(t=>t.clip&&t.mode==='loop');}
@@ -95,7 +105,8 @@ export class TapeEngine {
     if(!this.ctx){
       const Ctx = window.AudioContext || (window as unknown as {webkitAudioContext:typeof AudioContext}).webkitAudioContext;
       if(!Ctx)throw new Error('This browser does not support audio. Try Safari, Chrome, or Firefox.');
-      this.ctx=new Ctx({latencyHint:'interactive'});
+      // A modest output buffer gives file decoding and visual updates headroom.
+      this.ctx=new Ctx({latencyHint:'balanced'});
       this.initPromise=this.setup().catch(error=>{void this.ctx?.close();this.ctx=null;this.initPromise=null;throw error;});
     }
     await this.ctx.resume(); await this.initPromise;
@@ -111,28 +122,43 @@ export class TapeEngine {
     spring.buffer=impulse;this.reverbGain=ctx.createGain();this.tape.connect(spring);spring.connect(this.reverbGain);this.reverbGain.connect(this.master);
     this.spaceNode=new AudioWorkletNode(ctx,'magnetic-space',{outputChannelCount:[2]});this.spaceGain=ctx.createGain();this.tape.connect(this.spaceNode);this.spaceNode.connect(this.spaceGain);this.spaceGain.connect(this.master);
     const limiter=ctx.createDynamicsCompressor();limiter.threshold.value=-3;limiter.knee.value=5;limiter.ratio.value=16;limiter.attack.value=.003;limiter.release.value=.15;
-    this.capture=new AudioWorkletNode(ctx,'magnetic-capture',{outputChannelCount:[2]});
+    this.capture=new AudioWorkletNode(ctx,'magnetic-capture',{outputChannelCount:[2],processorOptions:{maxSeconds:MASTER_LIMIT}});
     this.analyser=ctx.createAnalyser();this.analyser.fftSize=256;
     this.master.connect(limiter);limiter.connect(this.capture);this.capture.connect(this.analyser);this.analyser.connect(ctx.destination);
     this.gains=this.tracks.map(()=>{const g=ctx.createGain(),pan=ctx.createStereoPanner(),send=ctx.createGain();g.connect(pan);pan.connect(this.input);pan.connect(send);send.connect(this.echoInput);this.pans.push(pan);this.sends.push(send);return g;});
-    this.capture.port.onmessage=({data})=>{
-      if(data.type==='chunk'){this.masterChunks[0].push(data.left);this.masterChunks[1].push(data.right);}
-      if(data.type==='done'){
-        const channels=this.masterChunks.map(joinChunks); this.masterChunks=[[],[]];
-        if(channels[0].length){this.takes.unshift({id:crypto.randomUUID(),name:`Take ${String(Math.max(0,...this.takes.map(t=>Number(t.name.replace('Take ',''))||0))+1).padStart(2,'0')}`,blob:encodeWav(channels,ctx.sampleRate),duration:channels[0].length/ctx.sampleRate});this.onNotice('Master take saved. Ready to export.');}
-        this.recording=false;this.stopResolve?.();this.stopResolve=null;this.onChange();
-      }
-    };
+    this.tape.port.onmessage=({data})=>{if(data.type==='cloud')this.cloudVisual=data;};
+    // The worklet sends PCM directly to the encoder, bypassing the UI thread.
+    this.recorder=new Worker('/audio/recorder-worker.js');
+    const channel=new MessageChannel();this.capture.port.postMessage({sink:channel.port1},[channel.port1]);
+    await new Promise<void>((resolve,reject)=>{
+      this.recorder.onerror=()=>{reject(new Error('The master recorder could not start. Reload the studio.'));this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onNotice('Master recorder interrupted. Previously saved takes are still available. Reload before recording again.');this.onChange();};
+      this.recorder.onmessage=({data})=>{
+        if(data.type==='ready')resolve();
+        if(data.type==='take'){
+          if(data.frames){this.takes.unshift({id:crypto.randomUUID(),name:`Take ${String(Math.max(0,...this.takes.map(t=>Number(t.name.replace('Take ',''))||0))+1).padStart(2,'0')}`,blob:data.blob,duration:data.duration});this.onNotice(data.limited?'30-minute limit reached. Master take saved.':'Master take saved. Ready to export.');}
+          this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onChange();
+        }
+      };
+      this.recorder.postMessage({source:channel.port2,sampleRate:ctx.sampleRate},[channel.port2]);
+    });
+    ctx.addEventListener('statechange',()=>{if(this.recording&&ctx.state!=='running')this.onNotice('Audio was interrupted by the browser. Keep the studio open; recording resumes with audio.');});
     this.updateParams();this.updateGains();
   }
   setParam(key:keyof Parameters,value:number){if(!Number.isFinite(value))return;if(key==='time'){this.sync=false;value=Math.max(.04,Math.min(1.5,value));}this.params={...this.params,[key]:value};this.updateParams();this.onChange();}
-  setTempo(bpm:number,division=this.division,sync=this.sync){if(!Number.isFinite(bpm))return;this.bpm=Math.max(40,Math.min(240,bpm));this.division=DIVISIONS[division]?division:'1/8';this.sync=sync;if(sync)this.params={...this.params,time:Math.max(.04,Math.min(1.5,60/this.bpm*DIVISIONS[this.division]))};this.updateParams();this.onChange();}
+  setTempo(bpm:number,division=this.division,sync=this.sync){if(!Number.isFinite(bpm))return;this.bpm=Math.max(40,Math.min(240,bpm));this.division=DIVISIONS[division]?division:'1/8';this.sync=sync;if(sync)this.params={...this.params,time:Math.max(.04,Math.min(1.5,60/this.bpm*DIVISIONS[this.division]))};this.headTiming=this.headTiming.map(h=>h.sync?{...h,time:Math.max(.04,Math.min(4.5,60/this.bpm*DIVISIONS[h.division]))}:h);this.updateParams();this.onChange();}
+  setHeadTime(index:number,time:number){if(!Number.isFinite(time))return;if(index===0){this.setParam('time',time);return;}this.headTiming=this.headTiming.map((h,i)=>i===index-1?{...h,time:Math.max(.04,Math.min(4.5,time)),sync:false}:h);this.updateParams();this.onChange();}
+  setHeadSync(index:number,sync:boolean,division?:string){if(index===0){this.setTempo(this.bpm,division||this.division,sync);return;}const h=this.headTiming[index-1];if(!h)return;const note=division&&DIVISIONS[division]?division:h.division;this.headTiming=this.headTiming.map((v,i)=>i===index-1?{time:sync?Math.max(.04,Math.min(4.5,60/this.bpm*DIVISIONS[note])):h.time,sync,division:note}:v);this.updateParams();this.onChange();}
+  resetHeadTimes(){this.headTiming=[{time:this.params.time*2,sync:false,division:'1/4'},{time:this.params.time*3,sync:false,division:'1/4 D'}];}
+  setCloud(key:keyof CloudParameters,value:number){if(!Number.isFinite(value))return;const [min,max]=CLOUD_RANGES[key];this.cloud={...this.cloud,[key]:Math.max(min,Math.min(max,value))};if(this.cloudVisual.motion==='play')this.setMotion('stop');this.updateParams();this.onChange();}
+  holdCloud(value:boolean){this.cloudHolding=value;this.updateParams();this.onChange();}
+  setMotion(motion:'record'|'play'|'stop'){this.tape?.port.postMessage({motion});this.cloudVisual={...this.cloudVisual,motion:motion==='stop'?'idle':motion};this.onChange();}
   tapTempo(){const now=performance.now();if(this.taps.length&&now-this.taps.at(-1)!>1800)this.taps=[];this.taps.push(now);this.taps=this.taps.slice(-5);if(this.taps.length>1)this.setTempo(Math.round(60000*(this.taps.length-1)/(now-this.taps[0])),this.division,true);}
   updateParams(){
     if(!this.tape||!this.ctx)return;const at=this.ctx.currentTime;
     for(const [key,value] of Object.entries(this.params))(this.tape.parameters as unknown as Map<string,AudioParam>).get(key)?.setTargetAtTime(value,at,.025);
+    for(const [key,value] of [...Object.entries(this.cloud),['head2',this.headTiming[0].time],['head3',this.headTiming[1].time]] as [string,number][])(this.tape.parameters as unknown as Map<string,AudioParam>).get(key)?.setTargetAtTime(value,at,.035);
     (this.tape.parameters as unknown as Map<string,AudioParam>).get('enabled')!.setTargetAtTime(this.enabled?1:0,at,.015);
-    this.tape.port.postMessage({heads:this.heads.map(Number),hold:this.holding,inputCut:this.inputCut,swell:this.swelling});
+    this.tape.port.postMessage({heads:this.heads.map(Number),hold:this.holding,inputCut:this.inputCut,swell:this.swelling,cloudHold:this.cloudHolding});
     (this.spaceNode.parameters as unknown as Map<string,AudioParam>).get('decay')!.setTargetAtTime(this.params.decay,at,.08);
     (this.spaceNode.parameters as unknown as Map<string,AudioParam>).get('damping')!.setTargetAtTime(this.params.age,at,.08);
     this.reverbGain.gain.setTargetAtTime(this.enabled?this.params.reverb*.65:0,at,.03);
@@ -146,31 +172,39 @@ export class TapeEngine {
   releasePerformance(){this.swelling=false;this.throwing=-1;this.brake(false);this.updateParams();this.updateGains();this.onChange();}
   private buffer(t:Track){
     const clip=t.clip!,{start,end}=this.loopBounds(this.tracks.indexOf(t));
-    const key=`${this.duration}:${t.reversed}:${t.mode}:${start}:${end}`;const cached=this.bufferCache.get(clip);if(cached?.key===key)return cached.buffer;
-    const b=this.ctx!.createBuffer(2,Math.ceil(this.duration*clip.sampleRate),clip.sampleRate);
+    const duration=t.mode==='tape'?this.duration:clip.channels[0].length/clip.sampleRate;
+    const key=`${duration}:${t.reversed}:${t.mode}:${start}:${end}`;const cached=this.bufferCache.get(clip);if(cached?.key===key)return cached.buffer;
+    const b=this.ctx!.createBuffer(2,Math.ceil(duration*clip.sampleRate),clip.sampleRate);
     for(let c=0;c<2;c++){const a=clip.channels[c]||clip.channels[0],out=b.getChannelData(c);out.set(t.reversed?a.slice().reverse():a);
       // Short splice fades keep arbitrary loop boundaries from clicking; timing stays exact.
       if(t.mode==='loop'){const from=Math.round(start*clip.sampleRate),to=Math.min(out.length,Math.round(end*clip.sampleRate)),fade=Math.min(Math.floor((to-from)/2),Math.ceil(clip.sampleRate*.003));for(let j=0;j<fade;j++){out[from+j]*=j/fade;out[to-1-j]*=j/fade;}}
     }this.bufferCache.set(clip,{key,buffer:b});return b;
   }
   async play(){await this.init();if(this.playing)return;if(!this.repeats&&this.position>=this.duration+this.tapeOrigin){this.position=0;this.tapeOrigin=0;}this.motorSpeed=this.braking?.025:this.speed;this.playing=true;this.startSources();this.onChange();}
-  private startSources(){
-    this.speedRamp=null;this.startedAt=this.ctx!.currentTime+.008;const at=this.startedAt;
-    this.sources=this.tracks.flatMap((t,i)=>{
+  private startSources(indices=this.tracks.map((_,i)=>i),replace=false){
+    // Prepare every buffer while existing sources are still audible. Start the
+    // crossfade only after allocation/copying finishes, on the audio clock.
+    const buffers=new Map(indices.flatMap(i=>this.tracks[i].clip?[[i,this.buffer(this.tracks[i])] as const]:[]));
+    const at=this.ctx!.currentTime+.025;
+    const position=replace?this.transportPosition+.025*this.motorSpeed:this.position;
+    if(replace)this.stopSources(indices,at);
+    else {this.speedRamp=null;this.startedAt=at;}
+    const added=indices.flatMap(i=>{const t=this.tracks[i];
       if(!t.clip)return[];const loops=t.mode==='loop'||(t.mode==='tape'&&this.loop);
-      const offset=t.mode==='tape'&&!this.loop?Math.max(0,this.position-this.tapeOrigin):this.position;
-      if(!loops&&offset>=this.duration)return[];
-      const node=this.ctx!.createBufferSource(),fade=this.ctx!.createGain();node.buffer=this.buffer(t);node.loop=loops;
+      const offset=t.mode==='tape'&&!this.loop?Math.max(0,position-this.tapeOrigin):position;
+      if(!loops&&offset>=buffers.get(i)!.duration)return[];
+      const node=this.ctx!.createBufferSource(),fade=this.ctx!.createGain();node.buffer=buffers.get(i)!;node.loop=loops;
       const bounds=t.mode==='loop'?this.loopBounds(i):{start:0,end:this.duration};node.loopStart=bounds.start;node.loopEnd=bounds.end;node.playbackRate.value=this.motorSpeed;
-      node.connect(fade);fade.connect(this.gains[i]);fade.gain.setValueAtTime(0,at);fade.gain.linearRampToValueAtTime(1,at+.005);
-      node.onended=()=>{node.disconnect();fade.disconnect();};node.start(at,loops?bounds.start+this.position%(bounds.end-bounds.start):offset);return[{node,fade}];
+      node.connect(fade);fade.connect(this.gains[i]);fade.gain.setValueAtTime(0,at);fade.gain.linearRampToValueAtTime(1,at+.025);
+      node.onended=()=>{node.disconnect();fade.disconnect();};node.start(at,loops?bounds.start+position%(bounds.end-bounds.start):offset);return[{node,fade,index:i}];
     });
+    this.sources=[...this.sources,...added].sort((a,b)=>a.index-b.index);
   }
   pause(){if(!this.playing)return;this.position=this.transportPosition;this.stopSources();this.playing=false;this.onChange();}
-  private stopSources(){const at=this.ctx!.currentTime;for(const {node,fade} of this.sources){fade.gain.cancelScheduledValues(at);fade.gain.setValueAtTime(fade.gain.value,at);fade.gain.linearRampToValueAtTime(0,at+.006);node.stop(at+.007);}this.sources=[];}
+  private stopSources(indices=this.tracks.map((_,i)=>i),at=this.ctx!.currentTime){for(const {node,fade,index} of this.sources){if(!indices.includes(index))continue;if(fade.gain.cancelAndHoldAtTime)fade.gain.cancelAndHoldAtTime(at);else{fade.gain.cancelScheduledValues(at);fade.gain.setValueAtTime(fade.gain.value,at);}fade.gain.linearRampToValueAtTime(0,at+.025);node.stop(at+.026);}this.sources=this.sources.filter(s=>!indices.includes(s.index));}
   stop(){this.pause();this.position=0;this.tapeOrigin=0;this.onChange();}
   seek(position:number){this.tapeOrigin=0;this.position=Math.max(0,Math.min(this.duration-.001,position));if(this.playing){this.stopSources();this.startSources();}this.onChange();}
-  private restart(){this.position=this.transportPosition;if(this.playing){this.stopSources();this.startSources();}}
+  private restart(indices=this.tracks.map((_,i)=>i)){if(this.playing)this.startSources(indices,true);}
   private rampSpeed(value:number,duration:number){
     const now=this.ctx?.currentTime||0,r=this.speedRamp,from=r?r.from+(r.to-r.from)*Math.min(1,Math.max(0,now-r.at)/r.duration):this.motorSpeed;
     this.position=this.transportPosition;this.motorSpeed=value;
@@ -178,16 +212,16 @@ export class TapeEngine {
   }
   setSpeed(value:number){this.speed=Math.max(.25,Math.min(2,value));if(!this.braking)this.rampSpeed(this.speed,.08);this.onChange();}
   toggleLoop(){if(this.loop)this.tapeOrigin=Math.floor(this.transportPosition/this.duration)*this.duration;else this.tapeOrigin=0;this.loop=!this.loop;this.restart();this.onChange();}
-  setTrackMode(i:number,mode:Track['mode']){this.remember(i);this.tracks[i].mode=mode;this.restart();this.onChange();}
-  setLoopBounds(i:number,start:number,end:number){if(!Number.isFinite(start)||!Number.isFinite(end))return;const t=this.tracks[i];if(!t.clip)return;this.remember(i);const length=t.clip.channels[0].length/t.clip.sampleRate,min=Math.min(.02,length);t.loopEnd=Math.max(min,Math.min(length,end));t.loopStart=Math.max(0,Math.min(start,t.loopEnd-min));t.mode='loop';this.restart();this.onChange();}
+  setTrackMode(i:number,mode:Track['mode']){this.remember(i);this.tracks[i].mode=mode;this.restart([i]);this.onChange();}
+  setLoopBounds(i:number,start:number,end:number){if(!Number.isFinite(start)||!Number.isFinite(end))return;const t=this.tracks[i];if(!t.clip)return;this.remember(i);const length=t.clip.channels[0].length/t.clip.sampleRate,min=Math.min(.02,length);t.loopEnd=Math.max(min,Math.min(length,end));t.loopStart=Math.max(0,Math.min(start,t.loopEnd-min));t.mode='loop';this.restart([i]);this.onChange();}
   tick(){if(this.playing&&!this.repeats&&this.transportPosition>=this.duration+this.tapeOrigin){this.pause();this.position=0;this.tapeOrigin=0;this.onChange();}}
   private remember(i:number){this.undoStack.push({index:i,track:{...this.tracks[i]}});if(this.undoStack.length>8)this.undoStack.shift();}
-  setClip(i:number,clip:Clip|null){const position=this.transportPosition;this.remember(i);this.tracks[i]={...this.tracks[i],clip,reversed:false,loopStart:0,loopEnd:0};this.position=position;if(this.playing){this.stopSources();this.startSources();}this.onChange();}
-  undo(){const state=this.undoStack.pop();if(!state)return;this.tracks[state.index]=state.track;this.restart();this.updateGains();this.onChange();}
-  reverse(i:number){this.remember(i);this.tracks[i].reversed=!this.tracks[i].reversed;this.restart();this.onChange();}
-  async importFile(file:File,index:number){if(file.size>60*1024*1024)throw new Error('Choose an audio file smaller than 60 MB.');await this.init();let decoded:AudioBuffer;try{decoded=await this.ctx!.decodeAudioData(await file.arrayBuffer());}catch{throw new Error('This audio format could not be read. Try WAV, MP3, M4A, or OGG.');}if(decoded.duration>180)throw new Error('Choose a sample under 3 minutes to keep the tape responsive.');const channels=[decoded.getChannelData(0).slice(),decoded.getChannelData(Math.min(1,decoded.numberOfChannels-1)).slice()];this.setClip(index,{name:file.name.replace(/\.[^.]+$/,''),channels,sampleRate:decoded.sampleRate});this.onNotice(`Loaded ${file.name} onto track ${index+1}.`);}
-  async startMaster(){await this.init();if(this.recording)return;this.masterChunks=[[],[]];this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
-  async stopMaster(){if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;}}
+  setClip(i:number,clip:Clip|null){const duration=this.duration;this.remember(i);this.tracks[i]={...this.tracks[i],clip,reversed:false,loopStart:0,loopEnd:0,...(!clip?{muted:false,solo:false}:{} )};this.restart(this.duration===duration?[i]:this.tracks.flatMap((t,j)=>j===i||t.mode==='tape'?[j]:[]));this.updateGains();this.onChange();}
+  undo(){const state=this.undoStack.pop();if(!state)return;const duration=this.duration;this.tracks[state.index]=state.track;this.restart(this.duration===duration?[state.index]:this.tracks.flatMap((t,i)=>i===state.index||t.mode==='tape'?[i]:[]));this.updateGains();this.onChange();}
+  reverse(i:number){this.remember(i);this.tracks[i].reversed=!this.tracks[i].reversed;this.restart([i]);this.onChange();}
+  async importFile(file:File,index:number){if(file.size>60*1024*1024)throw new Error('Choose an audio file smaller than 60 MB.');await this.init();let decoded:AudioBuffer;try{decoded=await this.ctx!.decodeAudioData(await file.arrayBuffer());}catch{throw new Error('This audio format could not be read. Try WAV, MP3, M4A, or OGG.');}if(decoded.duration>180)throw new Error('Choose a sample under 3 minutes to keep the tape responsive.');const channels=[decoded.getChannelData(0),decoded.getChannelData(Math.min(1,decoded.numberOfChannels-1))];const clip={name:file.name.replace(/\.[^.]+$/,''),channels,sampleRate:decoded.sampleRate};const duration=channels[0].length/clip.sampleRate;if(decoded.numberOfChannels<=2&&(this.tracks[index].mode!=='tape'||duration>=Math.max(1,...this.tracks.filter((_,i)=>i!==index).map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0)))&&this.tracks[index].mode!=='loop')this.bufferCache.set(clip,{key:`${duration}:false:${this.tracks[index].mode}:0:${duration}`,buffer:decoded});this.setClip(index,clip);this.onNotice(`Loaded ${file.name} onto track ${index+1}.`);}
+  async startMaster(){await this.init();if(this.recording||this.masterSaving)return;this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
+  async stopMaster(){if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterSaving=true;this.onChange();this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{if(!this.recording){resolve();return;}this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;this.masterSaving=false;}}
   async startMic(index:number){
     if(this.micRecording||this.micArming)return;this.micArming=true;this.onChange();
     try{
@@ -224,6 +258,6 @@ export class TapeEngine {
   async stopMic(){if(this.micStopPromise)return this.micStopPromise;if(!this.micRecording)return;this.micStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{this.micResolve=resolve;this.micCapture!.port.postMessage('stop');}));try{await this.micStopPromise;}finally{this.micStopPromise=null;}}
   private releaseMic(){this.micStream?.getTracks().forEach(t=>t.stop());this.micSource?.disconnect();this.micCapture?.disconnect();this.micSilent?.disconnect();this.micStream=null;this.micSource=null;this.micCapture=null;this.micSilent=null;this.micRecording=false;this.onChange();}
   setMonitoring(value:boolean){this.monitoring=value;if(this.micSource){if(value){this.micSource.connect(this.input);this.micSource.connect(this.echoInput);}else{this.micSource.disconnect(this.input);this.micSource.disconnect(this.echoInput);}}this.onChange();}
-  panic(){this.holding=false;this.inputCut=false;this.releasePerformance();this.setParam('feedback',.25);this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}this.onNotice('Echo and reverb cleared. Feedback reset.');}
+  panic(){this.holding=false;this.cloudHolding=false;this.inputCut=false;this.releasePerformance();this.setParam('feedback',.25);this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}this.onNotice('Echo, cloud and reverb cleared. Feedback reset.');}
   async bounce(index:number){const take=this.takes[0];if(!take)return;await this.importFile(new File([take.blob],`${take.name} bounce.wav`,{type:'audio/wav'}),index);}
 }

@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
-    "test:e2e": "node tests/audio.mjs && node tests/transport.mjs && node tests/browser.mjs",
+    "test:e2e": "node tests/audio.mjs && node tests/memory.mjs && node tests/transport.mjs && node tests/browser.mjs && node tests/recording.mjs",
     "test:release": "node tests/release.mjs"
   },
   "dependencies": { "react": "^19.1.0", "react-dom": "^19.1.0", "lucide-react": "^0.468.0" },

@@ -11,6 +11,7 @@ try{
   const cache=await page.evaluate(async()=>{const keys=await caches.keys();const cache=await caches.open(keys.find(k=>k.startsWith('magnetic-')));const response=await cache.match('/');return {cached:!!response,redirected:response?.redirected};});
   assert(cache.cached,'Canonical app document is precached');assert.equal(cache.redirected,false,'Offline document must not be a redirected response');
   await context.setOffline(true);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Open library for track 1',exact:true}).click();await page.getByRole('button',{name:/Soft keys/}).click();
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));
   await page.getByRole('button',{name:'Pause playback',exact:true}).click();
