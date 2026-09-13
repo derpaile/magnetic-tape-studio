@@ -14,10 +14,10 @@ const pass=name=>{checks.push(name);process.stdout.write(`PASS ${name}\n`);};
 function wav(){const sr=24000,frames=sr*3,b=Buffer.alloc(44+frames*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(sr,24);b.writeUInt32LE(sr*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(frames*2,40);for(let i=0;i<frames;i++){const t=i/sr;const s=t<.15?Math.sin(t*Math.PI*440*2)*Math.exp(-t*20)*.5:0;b.writeInt16LE(Math.round(s*32767),44+i*2);}return b;}
 try{
   await page.goto(base);await page.getByText('Saved on this device',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('slider').count(),30);
+  assert.equal(await page.getByRole('slider').count(),33);
   assert.equal(await page.getByRole('button',{name:/Select track [1-4]: Empty tape/}).count(),4);
   await page.screenshot({path:'test-results/desktop.png',fullPage:true});
-  pass('Empty desktop studio and 30 accessible controls');
+  pass('Empty desktop studio and 33 accessible controls');
   for(const size of [{width:1440,height:900},{width:1366,height:768},{width:1280,height:800}]){
     await page.setViewportSize(size);
     const cabinet=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth,top:document.querySelector('.instrument').getBoundingClientRect().top,panels:['.mechanical-bay','.control-panel','.tape-recorder','.character-rack','.performance-strip','.cloud-panel','.master-recorder'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {selector,x:r.x,y:r.y,right:r.right,bottom:r.bottom};})}));
@@ -26,9 +26,9 @@ try{
     await page.screenshot({path:`test-results/cabinet-${size.width}.png`,fullPage:true});
   }
   await page.setViewportSize({width:1440,height:900});
-  const originalTime=await page.getByLabel('Head 1 delay in milliseconds',{exact:true}).inputValue(),originalFeedback=await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow');
+  const originalTime=await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalFeedback=await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow');
   await page.getByRole('button',{name:'Wander',exact:true}).click();assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');assert.equal(await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow'),originalFeedback);
-  await page.getByRole('button',{name:'Return',exact:true}).click();assert.equal(await page.getByLabel('Head 1 delay in milliseconds',{exact:true}).inputValue(),originalTime);assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Warm space');
+  await page.getByRole('button',{name:'Return',exact:true}).click();assert.equal(await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalTime);assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Warm space');
   pass('Expanded cabinet has no overlap at three desktop sizes; Wander is reversible');
 
   await page.getByRole('button',{name:'Open library for track 1',exact:true}).click();await page.getByRole('button',{name:/Soft keys/}).click();
@@ -38,33 +38,32 @@ try{
   const output=await page.locator('.meter-wrap svg').getAttribute('aria-label');assert(!output.includes(' 0 percent'),`Audio must reach meter: ${output}`);
   pass('Library loads chosen lanes and produces real audio');
   const allocations=await page.evaluate(()=>window.__bufferAllocations);
-  await page.getByLabel('Tape speed',{exact:true}).selectOption('.5');await page.waitForTimeout(120);
-  await page.getByLabel('Tape speed',{exact:true}).selectOption('1');await page.waitForTimeout(120);
+  await page.getByRole('slider',{name:'Tape playback speed',exact:true}).fill('0.5');await page.waitForTimeout(120);
+  await page.getByRole('slider',{name:'Tape playback speed',exact:true}).fill('1');await page.waitForTimeout(120);
   assert.equal(await page.evaluate(()=>window.__bufferAllocations),allocations,'Changing speed does not reallocate track buffers');
   pass('Live speed changes reuse audio buffers and keep playback running');
   await page.getByRole('button',{name:'Loop track 1',exact:true}).click();
   await page.getByRole('button',{name:'1 beat',exact:true}).click();
   assert.equal(await page.getByLabel('Loop out',{exact:true}).inputValue(),'0.625');
-  await page.getByRole('button',{name:'Loop tape',exact:true}).click();
+  await page.getByRole('button',{name:'Full tape loop',exact:true}).click();
   const nativeLoop=await page.evaluate(()=>window.__sources.slice(-2).map(s=>({loop:s.loop,start:s.loopStart,end:s.loopEnd})));
   assert(nativeLoop[0].loop);assert.equal(nativeLoop[0].end,.625);assert(!nativeLoop[1].loop);
   await page.waitForTimeout(750);assert.equal(await page.getByRole('button',{name:'Loop track 1',exact:true}).getAttribute('aria-pressed'),'true');
   await page.getByRole('button',{name:'Head 1 tempo sync',exact:true}).click();await page.getByLabel('Tempo',{exact:true}).fill('120');await page.getByLabel('Tempo',{exact:true}).press('Enter');
-  await page.getByLabel('Head 1 note division',{exact:true}).selectOption('1/8 D');assert.equal(await page.getByLabel('Head 1 delay in milliseconds',{exact:true}).inputValue(),'375');
-  await page.getByLabel('Head 1 delay in milliseconds',{exact:true}).fill('680');await page.getByLabel('Head 1 delay in milliseconds',{exact:true}).press('Enter');assert.equal(await page.getByRole('button',{name:'Head 1 free time',exact:true}).getAttribute('aria-pressed'),'true');
+  await page.getByLabel('Head 1 note division',{exact:true}).selectOption('1/8 D');assert.equal(await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),'0.375');
+  await page.getByRole('slider',{name:'Head 1 time',exact:true}).focus();await page.keyboard.press('ArrowUp');assert.equal(await page.getByRole('button',{name:'Head 1 free time',exact:true}).getAttribute('aria-pressed'),'true');
   const swell=page.getByRole('button',{name:'Feedback swell',exact:true});await swell.focus();await page.keyboard.down('Space');assert.equal(await swell.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await swell.getAttribute('aria-pressed'),'false');
   const brake=page.getByRole('button',{name:'Tape brake',exact:true});await brake.focus();await page.keyboard.down('Enter');await page.waitForTimeout(150);assert.equal(await brake.getAttribute('aria-pressed'),'true');await page.keyboard.up('Enter');assert.equal(await brake.getAttribute('aria-pressed'),'false');
   await page.getByRole('button',{name:'Echo hold',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'true');await page.getByRole('button',{name:'Clear echo',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'false');
   const send=page.getByRole('slider',{name:'Selected track echo send',exact:true});await send.fill('0.2');
   const throwButton=page.getByRole('button',{name:'Dub throw',exact:true});await throwButton.focus();await page.keyboard.down('Space');assert.equal(await throwButton.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await send.inputValue(),'0.2');
-  await page.getByLabel('Selected track playback mode',{exact:true}).selectOption('tape');await page.getByRole('button',{name:'Loop tape',exact:true}).click();await send.fill('1');
-  pass('Own track loop uses native A–B timing; tempo sync, numeric delay, brake, swell, hold and dub throw work');
+  await page.getByLabel('Selected track playback mode',{exact:true}).selectOption('tape');await page.getByRole('button',{name:'Full tape loop',exact:true}).click();await send.fill('1');
+  pass('Own track loop uses native A–B timing; head knobs, tempo sync, brake, swell, hold and dub throw work');
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(500);
-  const heldHead2=await page.getByLabel('Head 2 delay in milliseconds',{exact:true}).inputValue();
-  await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).fill('1234');await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).press('Enter');
-  assert.equal(await page.getByLabel('Head 2 delay in milliseconds',{exact:true}).inputValue(),heldHead2);
-  await page.getByRole('button',{name:'Head 2 tempo sync',exact:true}).click();await page.getByLabel('Head 2 note division',{exact:true}).selectOption('1/4 D');assert.equal(await page.getByLabel('Head 2 delay in milliseconds',{exact:true}).inputValue(),'750');
-  assert.equal(await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).inputValue(),'1234');
+  const heldHead2=await page.getByRole('slider',{name:'Head 2 time',exact:true}).getAttribute('aria-valuenow');
+  await page.getByRole('slider',{name:'Head 3 time',exact:true}).focus();await page.keyboard.press('ArrowUp');
+  assert.equal(await page.getByRole('slider',{name:'Head 2 time',exact:true}).getAttribute('aria-valuenow'),heldHead2);
+  await page.getByRole('button',{name:'Head 2 tempo sync',exact:true}).click();await page.getByLabel('Head 2 note division',{exact:true}).selectOption('1/4 D');assert.equal(await page.getByRole('slider',{name:'Head 2 time',exact:true}).getAttribute('aria-valuenow'),'0.75');
   await page.locator('[data-track="3"]').evaluate((lane,bytes)=>{const dataTransfer=new DataTransfer();dataTransfer.items.add(new File([new Uint8Array(bytes)],'Lane drop.wav',{type:'audio/wav'}));lane.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer}));},Array.from(wav()));
   await page.getByRole('button',{name:'Select track 3: Lane drop',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Select track 1: Soft keys',exact:true}).getAttribute('aria-pressed'),'true');
   await page.getByRole('button',{name:'Delete track 3 audio',exact:true}).click();await page.getByRole('button',{name:'Select track 3: Empty tape',exact:true}).waitFor();
@@ -93,10 +92,10 @@ try{
   await page.getByRole('button',{name:'Select track 3: Test impulse',exact:true}).waitFor();
   await page.getByRole('button',{name:'Reverse',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Reverse',exact:true}).getAttribute('aria-pressed'),'true');
   await page.getByRole('button',{name:'Undo last track edit',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Reverse',exact:true}).getAttribute('aria-pressed'),'false');
-  await page.getByLabel('Tape speed',{exact:true}).selectOption('.5');await page.getByRole('button',{name:'Mute track 1',exact:true}).click();await page.getByRole('button',{name:'Solo track 3',exact:true}).click();
+  await page.getByRole('slider',{name:'Tape playback speed',exact:true}).fill('0.5');await page.getByRole('button',{name:'Mute track 1',exact:true}).click();await page.getByRole('button',{name:'Solo track 3',exact:true}).click();
   assert.equal(await page.getByRole('button',{name:'Mute track 1',exact:true}).getAttribute('aria-pressed'),'true');
   pass('WAV import, reverse, undo, tape speed, mute and solo');
-  await page.getByLabel('Tape speed',{exact:true}).selectOption('1');await page.getByRole('button',{name:'Solo track 3',exact:true}).click();await page.getByRole('button',{name:'Mute track 1',exact:true}).click();
+  await page.getByRole('slider',{name:'Tape playback speed',exact:true}).fill('1');await page.getByRole('button',{name:'Solo track 3',exact:true}).click();await page.getByRole('button',{name:'Mute track 1',exact:true}).click();
   await page.getByRole('button',{name:'Record microphone to selected track',exact:true}).click();await page.getByRole('button',{name:'Stop microphone recording',exact:true}).waitFor();await page.waitForTimeout(550);await page.getByRole('button',{name:'Stop microphone recording',exact:true}).click();await page.getByRole('button',{name:'Select track 3: Microphone take',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Monitor microphone',exact:true}).getAttribute('aria-pressed'),'false');
   pass('Microphone capture saves to selected track, monitoring defaults off');
@@ -106,9 +105,9 @@ try{
   await page.getByRole('button',{name:'Open recorded takes',exact:true}).click();await page.getByRole('button',{name:'To track 4',exact:true}).click();await page.getByRole('button',{name:'Select track 4: Take 01 bounce',exact:true}).waitFor();
   pass('Sound library and resampling master take to tape');
   await page.getByRole('button',{name:'Undo last track edit',exact:true}).click();
-  await page.getByRole('button',{name:'Loop track 4',exact:true}).click();await page.getByRole('button',{name:'2 beats',exact:true}).click();await page.getByRole('slider',{name:'Selected track echo send',exact:true}).fill('0.3');await page.getByRole('slider',{name:'Selected track pan',exact:true}).fill('-0.4');await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).fill('1321');await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).press('Enter');await page.getByRole('slider',{name:'Back to tape',exact:true}).focus();await page.keyboard.press('ArrowUp');await page.getByLabel('Session name',{exact:true}).fill('A saved experiment');await page.waitForTimeout(1000);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'A saved experiment');await page.getByRole('button',{name:'Select track 3: Microphone take + overdub',exact:true}).waitFor();await page.getByRole('button',{name:'Select track 4: Glass bells',exact:true}).waitFor();await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Loop track 4',exact:true}).click();await page.getByRole('button',{name:'2 beats',exact:true}).click();await page.getByRole('slider',{name:'Selected track echo send',exact:true}).fill('0.3');await page.getByRole('slider',{name:'Selected track pan',exact:true}).fill('-0.4');await page.getByRole('slider',{name:'Head 3 time',exact:true}).focus();await page.keyboard.press('ArrowUp');const savedHead3=await page.getByRole('slider',{name:'Head 3 time',exact:true}).getAttribute('aria-valuenow');await page.getByRole('slider',{name:'Back to tape',exact:true}).focus();await page.keyboard.press('ArrowUp');await page.getByLabel('Session name',{exact:true}).fill('A saved experiment');await page.waitForTimeout(1000);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'A saved experiment');await page.getByRole('button',{name:'Select track 3: Microphone take + overdub',exact:true}).waitFor();await page.getByRole('button',{name:'Select track 4: Glass bells',exact:true}).waitFor();await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();
   assert.equal(await page.getByLabel('Selected track playback mode',{exact:true}).inputValue(),'loop');assert.equal(await page.getByLabel('Loop out',{exact:true}).inputValue(),'1');assert.equal(await page.getByRole('slider',{name:'Selected track echo send',exact:true}).inputValue(),'0.3');assert.equal(await page.getByRole('slider',{name:'Selected track pan',exact:true}).inputValue(),'-0.4');pass('Session, independent loop, pan/send, audio and master take survive reload');
-  assert.equal(await page.getByLabel('Head 3 delay in milliseconds',{exact:true}).inputValue(),'1321');assert.equal(await page.getByRole('slider',{name:'Back to tape',exact:true}).getAttribute('aria-valuenow'),'0.007');
+  assert.equal(await page.getByRole('slider',{name:'Head 3 time',exact:true}).getAttribute('aria-valuenow'),savedHead3);assert.equal(await page.getByRole('slider',{name:'Back to tape',exact:true}).getAttribute('aria-valuenow'),'0.007');
   const stored=await page.evaluate(async()=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('magnetic-studio');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const tx=db.transaction(['session','clips']);const row=await new Promise(resolve=>{const req=tx.objectStore('session').get('current');req.onsuccess=()=>resolve(req.result);});return {schema:row.schema,embedded:!!row.tracks[0].clip,refs:row.tracks.every(t=>typeof t.clipId==='string'),takes:row.takeIds.length};});
   assert.equal(stored.schema,2);assert.equal(stored.embedded,false);assert(stored.refs);assert.equal(stored.takes,1);
   pass('Session controls are saved separately from sample audio');

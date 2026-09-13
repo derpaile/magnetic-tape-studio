@@ -55,7 +55,8 @@ Browser checks use the locally installed Chrome by default (set `CHROME_PATH` to
 ## Play the machine
 
 - Every track has Follow tape, Own loop, and One shot playback. Its own A–B loop repeats independently of the other clips and the global loop switch. Set boundaries in seconds, drag the two markers, capture A/B at the playhead, or choose 1/2/4/8 beats or the full clip. Short splice fades soften loop clicks. Beat lengths refer to source time at 1× speed. Undo restores loop edits too.
-- Delay time is explicit: 40–1500 ms, editable numeric input, BPM sync (40–240), straight/dotted/triplet subdivisions, averaged tap tempo, and independent Free/Sync and note division for each head (head 1: up to 1.5 seconds; heads 2/3: up to 4.5 seconds). Out-of-range tempo combinations show their 1500 ms limit. Turning delay time returns to Free mode and bends the echo pitch.
+- Each playback head has its own delay-time knob, Free/Sync switch and straight/dotted/triplet note division. Sync follows the shared 40–240 BPM tempo; head 1 reaches 1.5 seconds and heads 2/3 reach 4.5 seconds. Out-of-range tempo combinations show their limit. Turning a head’s time returns only that head to Free mode and bends its echo pitch.
+- Tape speed is a continuous 0.25×–2× slider. Full tape loop repeats tracks set to Follow tape; switching it off makes those tracks play once while Own loops keep repeating.
 - Per-track pan and post-fader Echo send, plus a momentary Dub throw to send individual phrases at full level. Mute/solo stop new input while existing echoes continue.
 - Tape saturation, age, independent wow/flutter, irregular crinkles/dropouts and signal-following hiss also colour the dry tape. Low cut and tone shape repeat decay; Stereo spread pans heads and crosses the feedback between channels.
 - Separate spring and ambient reverb amounts; an eight-line diffuse stereo room has a 1–20 second nominal decay. Damping follows tape age.
