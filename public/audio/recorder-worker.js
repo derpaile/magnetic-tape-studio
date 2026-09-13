@@ -1,36 +1,47 @@
-/* PCM encoding stays off the interface and audio threads. Blob parts avoid a
-   second full-length PCM allocation when a 30-minute performance is saved. */
-let source, rate = 48000, parts = [], frames = 0;
-function header(count) {
-  const bytes = new ArrayBuffer(44), v = new DataView(bytes);
-  const str = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
-  str(0, 'RIFF'); v.setUint32(4, 36 + count * 4, true); str(8, 'WAVE');
-  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, 2, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 4, true);
-  v.setUint16(32, 4, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, count * 4, true);
-  return bytes;
+/* Raw PCM only during capture. This worker owns storage and never sends sample
+   arrays through React. A shared ring absorbs up to eight seconds of stalls;
+   browsers without isolation use a direct, recycled MessagePort pool. */
+let source, rate = 48000, parts = [], frames = 0, state, ring, capacity = 0, timer;
+const CHUNK = 8192;
+function store(left, right, count) {
+  // Fixed planar blocks: left then right; only the final block may be short.
+  parts.push(new Blob([left.subarray(0, count), right.subarray(0, count)]));
+  frames += count;
+}
+function drain(final = false) {
+  if (!state) return;
+  let read = Atomics.load(state, 1), available = Atomics.load(state, 0) - read;
+  while (available >= CHUNK || (final && available > 0)) {
+    const count = Math.min(CHUNK, available), left = new Float32Array(count), right = new Float32Array(count);
+    for (let i = 0; i < count; i++) { const at = (read + i) % capacity; left[i] = ring[at]; right[i] = ring[capacity + at]; }
+    store(left, right, count);
+    read += count; available -= count; Atomics.store(state, 1, read);
+  }
 }
 self.onmessage = ({data}) => {
   if (!data.source) return;
   source = data.source; rate = data.sampleRate;
+  if (data.shared) { state = new Int32Array(data.shared.state); ring = new Float32Array(data.shared.audio); capacity = ring.length / 2; }
   source.onmessage = ({data: message}) => {
-    if (message.type === 'started') { parts = []; frames = 0; }
-    if (message.type === 'chunk') {
-      const {left, right} = message, count = message.frames ?? left.length;
-      const bytes = new ArrayBuffer(count * 4), view = new DataView(bytes);
-      for (let i = 0; i < count; i++) {
-        const l = Math.max(-1, Math.min(1, left[i])), r = Math.max(-1, Math.min(1, right[i]));
-        view.setInt16(i * 4, l < 0 ? l * 32768 : l * 32767, true);
-        view.setInt16(i * 4 + 2, r < 0 ? r * 32768 : r * 32767, true);
+    try {
+      if (message.type === 'started') { parts = []; frames = 0; if (state) { clearInterval(timer); timer = setInterval(drain, 40); } }
+      if (message.type === 'chunk') {
+        const {left, right} = message;
+        store(left, right, message.frames ?? left.length);
+        source.postMessage({type: 'recycle', left, right}, [left.buffer, right.buffer]);
       }
-      parts.push(new Blob([bytes])); frames += count;
-      source.postMessage({type: 'recycle', left, right}, [left.buffer, right.buffer]);
-    }
-    if (message.type === 'done') {
-      const blob = new Blob([header(frames), ...parts], {type: 'audio/wav'});
-      self.postMessage({type: 'take', blob, frames, duration: frames / rate, limited: message.limited});
-      parts = []; frames = 0;
+      if (message.type === 'done') {
+        clearInterval(timer); drain(true);
+        const blob = new Blob(parts, {type:'application/x-magnetic-pcm'});
+        self.postMessage({type:'take', blob, frames, duration:frames/rate,
+          pcm:{sampleRate:rate, frames, chunkFrames:CHUNK}, limited:message.limited,
+          interrupted:!!message.interrupted || frames !== message.frames});
+        parts = []; frames = 0;
+      }
+    } catch {
+      clearInterval(timer);
+      self.postMessage({type:'error',message:'The recorder ran out of storage or memory. Previously saved takes are safe. Reload before recording again.'});
     }
   };
-  self.postMessage({type: 'ready'});
+  self.postMessage({type:'ready'});
 };

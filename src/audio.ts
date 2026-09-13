@@ -2,7 +2,7 @@ export type Clip = { name: string; channels: Float32Array[]; sampleRate: number 
 export type Track = { clip: Clip | null; volume: number; muted: boolean; solo: boolean; reversed: boolean; mode: 'tape'|'loop'|'once'; loopStart: number; loopEnd: number; pan: number; send: number };
 export const TRACK_DEFAULTS = {mode:'tape' as const,loopStart:0,loopEnd:0,pan:0,send:1};
 export type Parameters = { time: number; feedback: number; mix: number; age: number; wow: number; flutter: number; drive: number; tone: number; reverb: number; volume: number; hiss: number; crinkle: number; lowCut: number; spread: number; space: number; decay: number };
-export type Take = { id: string; name: string; blob: Blob; duration: number };
+export type Take = { id: string; name: string; blob: Blob; duration: number; pcm?: {sampleRate:number;frames:number;chunkFrames:number}; interrupted?:boolean };
 export const MASTER_LIMIT = 30 * 60;
 export type HeadTiming = {time:number;sync:boolean;division:string};
 export type CloudParameters = {dissolve:number;grainSize:number;memory:number;scatter:number;wander:number;return:number};
@@ -80,7 +80,12 @@ export class TapeEngine {
   private input!: GainNode; private echoInput!: GainNode; private spaceNode!: AudioWorkletNode; private spaceGain!: GainNode; private spring!:ConvolverNode; private tape!: AudioWorkletNode; private reverbGain!: GainNode; private master!: GainNode;
   analyser!: AnalyserNode; private capture!: AudioWorkletNode;
   private micStream: MediaStream|null=null; private micSource: MediaStreamAudioSourceNode|null=null; private micCapture:AudioWorkletNode|null=null; private micSilent:GainNode|null=null;
-  private recorder!:Worker; private micChunks:Float32Array[][]=[[],[]];
+  private recorder!:Worker; private recorderFailed=false;
+  private wavJobs=new WeakMap<Blob,Promise<Blob>>();
+  private captureState:Int32Array|null=null;
+  get recordedDuration(){return this.captureState?Atomics.load(this.captureState,0)/this.ctx!.sampleRate:Math.max(0,(this.ctx?.currentTime||0)-this.recordingStarted);}
+  private recorderError(message:string){this.recorderFailed=true;this.capture?.port.postMessage('stop');this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onNotice(message);this.onChange();}
+  private micChunks:Float32Array[][]=[[],[]];
   private initPromise:Promise<void>|null=null; private stopResolve:(()=>void)|null=null; private micResolve:(()=>void)|null=null;
   private undoStack: {index:number;track:Track}[]=[]; private micTarget=0; private micOffset=0; private micRate=1; private micOverdub=false;
   private bufferCache=new WeakMap<Clip,{key:string;buffer:AudioBuffer}>();
@@ -98,15 +103,15 @@ export class TapeEngine {
     const t=Math.min(dt,r.duration);
     return this.position+r.from*t+(r.to-r.from)*t*t/(2*r.duration)+Math.max(0,dt-r.duration)*r.to;
   }
-  get currentPosition(){return this.repeats?this.transportPosition%this.duration:Math.min(Math.max(0,this.transportPosition-this.tapeOrigin),this.duration);}
+  get currentPosition(){return this.loop?Math.max(0,this.transportPosition-this.tapeOrigin)%this.duration:this.repeats?this.transportPosition%this.duration:Math.min(Math.max(0,this.transportPosition-this.tapeOrigin),this.duration);}
   loopBounds(i:number){const t=this.tracks[i],length=t.clip?t.clip.channels[0].length/t.clip.sampleRate:1;const end=Math.max(.001,Math.min(length,t.loopEnd||length));return {start:Math.max(0,Math.min(t.loopStart,end-.001)),end};}
-  trackPosition(i:number){const t=this.tracks[i],p=this.transportPosition;if(t.mode==='loop'){const {start,end}=this.loopBounds(i);return start+p%(end-start);}return t.mode==='tape'?(this.loop?p%this.duration:Math.min(Math.max(0,p-this.tapeOrigin),this.duration)):Math.min(p,this.duration);}
+  trackPosition(i:number){const t=this.tracks[i],p=this.transportPosition;if(t.mode==='loop'){const {start,end}=this.loopBounds(i);return start+p%(end-start);}return t.mode==='tape'?(this.loop?Math.max(0,p-this.tapeOrigin)%this.duration:Math.min(Math.max(0,p-this.tapeOrigin),this.duration)):Math.min(p,this.duration);}
   async init() {
     if(!this.ctx){
       const Ctx = window.AudioContext || (window as unknown as {webkitAudioContext:typeof AudioContext}).webkitAudioContext;
       if(!Ctx)throw new Error('This browser does not support audio. Try Safari, Chrome, or Firefox.');
       // A modest output buffer gives file decoding and visual updates headroom.
-      this.ctx=new Ctx({latencyHint:'balanced'});
+      this.ctx=new Ctx({latencyHint:.08,sampleRate:48000});
       this.initPromise=this.setup().catch(error=>{void this.ctx?.close();this.ctx=null;this.initPromise=null;throw error;});
     }
     await this.ctx.resume(); await this.initPromise;
@@ -114,7 +119,7 @@ export class TapeEngine {
   private async setup(){
     const ctx=this.ctx!;
     if(!ctx.audioWorklet)throw new Error('Audio needs HTTPS or localhost. Open this app through a secure address.');
-    await ctx.audioWorklet.addModule('/audio/tape-processor.js');
+    await ctx.audioWorklet.addModule(`/audio/tape-processor.js?v=${__AUDIO_VERSION__}`);
     this.input=ctx.createGain();this.echoInput=ctx.createGain();this.tape=new AudioWorkletNode(ctx,'magnetic-tape',{numberOfInputs:2,outputChannelCount:[2]});
     this.input.connect(this.tape,0,0);this.echoInput.connect(this.tape,0,1); this.master=ctx.createGain();this.tape.connect(this.master);
     const spring=this.spring=ctx.createConvolver(); const impulse=ctx.createBuffer(2,Math.floor(ctx.sampleRate*2.7),ctx.sampleRate);
@@ -127,19 +132,24 @@ export class TapeEngine {
     this.master.connect(limiter);limiter.connect(this.capture);this.capture.connect(this.analyser);this.analyser.connect(ctx.destination);
     this.gains=this.tracks.map(()=>{const g=ctx.createGain(),pan=ctx.createStereoPanner(),send=ctx.createGain();g.connect(pan);pan.connect(this.input);pan.connect(send);send.connect(this.echoInput);this.pans.push(pan);this.sends.push(send);return g;});
     this.tape.port.onmessage=({data})=>{if(data.type==='cloud')this.cloudVisual=data;};
-    // The worklet sends PCM directly to the encoder, bypassing the UI thread.
-    this.recorder=new Worker('/audio/recorder-worker.js');
+    // Eight seconds of shared PCM absorb worker scheduling stalls. The audio
+    // callback only copies samples; WAV conversion happens on demand elsewhere.
+    this.recorder=new Worker(`/audio/recorder-worker.js?v=${__AUDIO_VERSION__}`);
+    const shared=globalThis.crossOriginIsolated&&typeof SharedArrayBuffer!=='undefined'?{state:new SharedArrayBuffer(16),audio:new SharedArrayBuffer(ctx.sampleRate*8*2*4)}:undefined;
+    if(shared)this.captureState=new Int32Array(shared.state);
+    this.capture.port.postMessage({shared});
     const channel=new MessageChannel();this.capture.port.postMessage({sink:channel.port1},[channel.port1]);
     await new Promise<void>((resolve,reject)=>{
-      this.recorder.onerror=()=>{reject(new Error('The master recorder could not start. Reload the studio.'));this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onNotice('Master recorder interrupted. Previously saved takes are still available. Reload before recording again.');this.onChange();};
+      this.recorder.onerror=()=>{reject(new Error('The master recorder could not start. Reload the studio.'));this.recorderError('Master recorder interrupted. Previously saved takes are still available. Reload before recording again.');};
       this.recorder.onmessage=({data})=>{
         if(data.type==='ready')resolve();
+        if(data.type==='error')this.recorderError(data.message);
         if(data.type==='take'){
-          if(data.frames){this.takes.unshift({id:crypto.randomUUID(),name:`Take ${String(Math.max(0,...this.takes.map(t=>Number(t.name.replace('Take ',''))||0))+1).padStart(2,'0')}`,blob:data.blob,duration:data.duration});this.onNotice(data.limited?'30-minute limit reached. Master take saved.':'Master take saved. Ready to export.');}
+          if(data.frames){this.takes.unshift({id:crypto.randomUUID(),name:`Take ${String(Math.max(0,...this.takes.map(t=>Number(t.name.replace('Take ',''))||0))+1).padStart(2,'0')}`,blob:data.blob,duration:data.duration,pcm:data.pcm,interrupted:data.interrupted});this.onNotice(data.interrupted?'Capture buffer filled. The complete captured portion was saved; recording stopped.':data.limited?'30-minute limit reached. Master take saved.':'Master take saved. WAV is prepared when you export.');}
           this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onChange();
         }
       };
-      this.recorder.postMessage({source:channel.port2,sampleRate:ctx.sampleRate},[channel.port2]);
+      this.recorder.postMessage({source:channel.port2,sampleRate:ctx.sampleRate,shared},[channel.port2]);
     });
     ctx.addEventListener('statechange',()=>{if(this.recording&&ctx.state!=='running')this.onNotice('Audio was interrupted by the browser. Keep the studio open; recording resumes with audio.');});
     this.updateParams();this.updateGains();
@@ -191,12 +201,12 @@ export class TapeEngine {
     else {this.speedRamp=null;this.startedAt=at;}
     const added=indices.flatMap(i=>{const t=this.tracks[i];
       if(!t.clip)return[];const loops=t.mode==='loop'||(t.mode==='tape'&&this.loop);
-      const offset=t.mode==='tape'&&!this.loop?Math.max(0,position-this.tapeOrigin):position;
+      const offset=t.mode==='tape'?Math.max(0,position-this.tapeOrigin):position;
       if(!loops&&offset>=buffers.get(i)!.duration)return[];
       const node=this.ctx!.createBufferSource(),fade=this.ctx!.createGain();node.buffer=buffers.get(i)!;node.loop=loops;
       const bounds=t.mode==='loop'?this.loopBounds(i):{start:0,end:this.duration};node.loopStart=bounds.start;node.loopEnd=bounds.end;node.playbackRate.value=this.motorSpeed;
       node.connect(fade);fade.connect(this.gains[i]);fade.gain.setValueAtTime(0,at);fade.gain.linearRampToValueAtTime(1,at+.025);
-      node.onended=()=>{node.disconnect();fade.disconnect();};node.start(at,loops?bounds.start+position%(bounds.end-bounds.start):offset);return[{node,fade,index:i}];
+      node.onended=()=>{node.disconnect();fade.disconnect();};node.start(at,loops?bounds.start+offset%(bounds.end-bounds.start):offset);return[{node,fade,index:i}];
     });
     this.sources=[...this.sources,...added].sort((a,b)=>a.index-b.index);
   }
@@ -211,16 +221,80 @@ export class TapeEngine {
     if(this.playing){this.startedAt=now;this.speedRamp={from,to:value,at:now,duration};for(const {node} of this.sources){node.playbackRate.cancelScheduledValues(now);node.playbackRate.setValueAtTime(from,now);node.playbackRate.linearRampToValueAtTime(value,now+duration);}}else this.speedRamp=null;
   }
   setSpeed(value:number){this.speed=Math.max(.25,Math.min(2,value));if(!this.braking)this.rampSpeed(this.speed,.08);this.onChange();}
-  toggleLoop(){if(this.loop)this.tapeOrigin=Math.floor(this.transportPosition/this.duration)*this.duration;else this.tapeOrigin=0;this.loop=!this.loop;this.restart();this.onChange();}
+  toggleLoop(){if(this.loop)this.tapeOrigin=this.transportPosition-this.currentPosition;this.loop=!this.loop;this.restart();this.onChange();}
   setTrackMode(i:number,mode:Track['mode']){this.remember(i);this.tracks[i].mode=mode;this.restart([i]);this.onChange();}
   setLoopBounds(i:number,start:number,end:number){if(!Number.isFinite(start)||!Number.isFinite(end))return;const t=this.tracks[i];if(!t.clip)return;this.remember(i);const length=t.clip.channels[0].length/t.clip.sampleRate,min=Math.min(.02,length);t.loopEnd=Math.max(min,Math.min(length,end));t.loopStart=Math.max(0,Math.min(start,t.loopEnd-min));t.mode='loop';this.restart([i]);this.onChange();}
   tick(){if(this.playing&&!this.repeats&&this.transportPosition>=this.duration+this.tapeOrigin){this.pause();this.position=0;this.tapeOrigin=0;this.onChange();}}
   private remember(i:number){this.undoStack.push({index:i,track:{...this.tracks[i]}});if(this.undoStack.length>8)this.undoStack.shift();}
-  setClip(i:number,clip:Clip|null){const duration=this.duration;this.remember(i);this.tracks[i]={...this.tracks[i],clip,reversed:false,loopStart:0,loopEnd:0,...(!clip?{muted:false,solo:false}:{} )};this.restart(this.duration===duration?[i]:this.tracks.flatMap((t,j)=>j===i||t.mode==='tape'?[j]:[]));this.updateGains();this.onChange();}
-  undo(){const state=this.undoStack.pop();if(!state)return;const duration=this.duration;this.tracks[state.index]=state.track;this.restart(this.duration===duration?[state.index]:this.tracks.flatMap((t,i)=>i===state.index||t.mode==='tape'?[i]:[]));this.updateGains();this.onChange();}
+  setClip(i:number,clip:Clip|null){const duration=this.duration,phase=this.currentPosition;this.remember(i);this.tracks[i]={...this.tracks[i],clip,reversed:false,loopStart:0,loopEnd:0,...(!clip?{muted:false,solo:false}:{} )};if(this.loop&&this.duration!==duration)this.tapeOrigin=this.transportPosition-Math.min(phase,this.duration-.001);this.restart(this.duration===duration?[i]:this.tracks.flatMap((t,j)=>j===i||t.mode==='tape'?[j]:[]));this.updateGains();this.onChange();}
+  undo(){const state=this.undoStack.pop();if(!state)return;const duration=this.duration,phase=this.currentPosition;this.tracks[state.index]=state.track;if(this.loop&&this.duration!==duration)this.tapeOrigin=this.transportPosition-Math.min(phase,this.duration-.001);this.restart(this.duration===duration?[state.index]:this.tracks.flatMap((t,i)=>i===state.index||t.mode==='tape'?[i]:[]));this.updateGains();this.onChange();}
   reverse(i:number){this.remember(i);this.tracks[i].reversed=!this.tracks[i].reversed;this.restart([i]);this.onChange();}
-  async importFile(file:File,index:number){if(file.size>60*1024*1024)throw new Error('Choose an audio file smaller than 60 MB.');await this.init();let decoded:AudioBuffer;try{decoded=await this.ctx!.decodeAudioData(await file.arrayBuffer());}catch{throw new Error('This audio format could not be read. Try WAV, MP3, M4A, or OGG.');}if(decoded.duration>180)throw new Error('Choose a sample under 3 minutes to keep the tape responsive.');const channels=[decoded.getChannelData(0),decoded.getChannelData(Math.min(1,decoded.numberOfChannels-1))];const clip={name:file.name.replace(/\.[^.]+$/,''),channels,sampleRate:decoded.sampleRate};const duration=channels[0].length/clip.sampleRate;if(decoded.numberOfChannels<=2&&(this.tracks[index].mode!=='tape'||duration>=Math.max(1,...this.tracks.filter((_,i)=>i!==index).map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0)))&&this.tracks[index].mode!=='loop')this.bufferCache.set(clip,{key:`${duration}:false:${this.tracks[index].mode}:0:${duration}`,buffer:decoded});this.setClip(index,clip);this.onNotice(`Loaded ${file.name} onto track ${index+1}.`);}
-  async startMaster(){await this.init();if(this.recording||this.masterSaving)return;this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
+  private async prepareBuffer(track:Track,duration:number){
+    track={...track};
+    const clip=track.clip;if(!clip)return;
+    const length=clip.channels[0].length/clip.sampleRate;
+    const end=Math.max(.001,Math.min(length,track.loopEnd||length)),start=Math.max(0,Math.min(track.loopStart,end-.001));
+    const seconds=track.mode==='tape'?duration:length,key=`${seconds}:${track.reversed}:${track.mode}:${start}:${end}`;
+    if(this.bufferCache.get(clip)?.key===key)return;
+    const buffer=this.ctx!.createBuffer(2,Math.ceil(seconds*clip.sampleRate),clip.sampleRate);
+    for(let c=0;c<2;c++){
+      const src=clip.channels[c]||clip.channels[0],dst=buffer.getChannelData(c);
+      for(let offset=0;offset<src.length;offset+=32768){
+        const until=Math.min(src.length,offset+32768);
+        if(track.reversed)for(let i=offset;i<until;i++)dst[i]=src[src.length-1-i];
+        else dst.set(src.subarray(offset,until),offset);
+        // Let input, painting and native audio tasks run between sample copies.
+        await new Promise<void>(resolve=>setTimeout(resolve,0));
+      }
+      if(track.mode==='loop'){const from=Math.round(start*clip.sampleRate),to=Math.min(dst.length,Math.round(end*clip.sampleRate)),fade=Math.min(Math.floor((to-from)/2),Math.ceil(clip.sampleRate*.003));for(let j=0;j<fade;j++){dst[from+j]*=j/fade;dst[to-1-j]*=j/fade;}}
+    }
+    this.bufferCache.set(clip,{key,buffer});
+  }
+  async loadDemo(kind:string,index:number){
+    const clip=await new Promise<Clip>((resolve,reject)=>{
+      const worker=new Worker(new URL('./sample-worker.ts',import.meta.url),{type:'module'});
+      worker.onmessage=({data})=>{worker.terminate();resolve(data);};
+      worker.onerror=()=>{worker.terminate();reject(new Error('This sound could not be prepared. Please try again.'));};
+      worker.postMessage({kind});
+    });
+    if(this.ctx){
+      const duration=Math.max(1,clip.channels[0].length/clip.sampleRate,...this.tracks.filter((_,i)=>i!==index).map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0));
+      await this.prepareBuffer({...this.tracks[index],clip,reversed:false,loopStart:0,loopEnd:0},duration);
+      if(duration!==this.duration)for(let i=0;i<4;i++)if(i!==index&&this.tracks[i].mode==='tape')await this.prepareBuffer(this.tracks[i],duration);
+    }
+    this.setClip(index,clip);
+  }
+  async importFile(file:File,index:number){
+    if(file.size>60*1024*1024)throw new Error('Choose an audio file smaller than 60 MB.');
+    await this.init();let decoded:AudioBuffer;
+    // Decoding uses a separate offline context, away from the live graph.
+    const decoder=new OfflineAudioContext(2,1,this.ctx!.sampleRate);
+    try{decoded=await decoder.decodeAudioData(await file.arrayBuffer());}catch{throw new Error('This audio format could not be read. Try WAV, MP3, M4A, or OGG.');}
+    if(decoded.duration>180)throw new Error('Choose a sample under 3 minutes to keep the tape responsive.');
+    const channels=[decoded.getChannelData(0),decoded.getChannelData(Math.min(1,decoded.numberOfChannels-1))];
+    const clip={name:file.name.replace(/\.[^.]+$/,''),channels,sampleRate:decoded.sampleRate};
+    const next={...this.tracks[index],clip,reversed:false,loopStart:0,loopEnd:0};
+    const duration=Math.max(1,decoded.duration,...this.tracks.filter((_,i)=>i!==index).map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0));
+    if(decoded.numberOfChannels<=2&&next.mode!=='loop'&&(next.mode!=='tape'||decoded.duration===duration))this.bufferCache.set(clip,{key:`${decoded.duration}:false:${next.mode}:0:${decoded.duration}`,buffer:decoded});
+    await this.prepareBuffer(next,duration);
+    // Only followers need new padding when the full reel gets longer.
+    if(duration!==this.duration)for(let i=0;i<4;i++)if(i!==index&&this.tracks[i].mode==='tape')await this.prepareBuffer(this.tracks[i],duration);
+    this.setClip(index,clip);this.onNotice(`Loaded ${file.name} onto track ${index+1}.`);
+  }
+  async takeWav(take:Take):Promise<Blob>{
+    if(!take.pcm)return take.blob; // Existing WAV takes remain byte-for-byte compatible.
+    const pending=this.wavJobs.get(take.blob);if(pending)return pending;
+    const job=new Promise<Blob>((resolve,reject)=>{
+      const worker=new Worker(`/audio/wav-worker.js?v=${__AUDIO_VERSION__}`);
+      worker.onmessage=({data})=>{worker.terminate();if(data.error)reject(new Error(data.error));else resolve(data.blob);};
+      worker.onerror=()=>{worker.terminate();reject(new Error('WAV export failed. Your raw take is still saved; try again.'));};
+      worker.postMessage({blob:take.blob,pcm:take.pcm});
+    });
+    this.wavJobs.set(take.blob,job);
+    // Share concurrent requests, then release the extra WAV memory.
+    try{return await job;}finally{this.wavJobs.delete(take.blob);}
+  }
+  async startMaster(){await this.init();if(this.recorderFailed)throw new Error('Reload the studio before recording again.');if(this.recording||this.masterSaving)return;if(this.captureState)this.captureState.fill(0);this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
   async stopMaster(){if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterSaving=true;this.onChange();this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{if(!this.recording){resolve();return;}this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;this.masterSaving=false;}}
   async startMic(index:number){
     if(this.micRecording||this.micArming)return;this.micArming=true;this.onChange();
@@ -259,5 +333,5 @@ export class TapeEngine {
   private releaseMic(){this.micStream?.getTracks().forEach(t=>t.stop());this.micSource?.disconnect();this.micCapture?.disconnect();this.micSilent?.disconnect();this.micStream=null;this.micSource=null;this.micCapture=null;this.micSilent=null;this.micRecording=false;this.onChange();}
   setMonitoring(value:boolean){this.monitoring=value;if(this.micSource){if(value){this.micSource.connect(this.input);this.micSource.connect(this.echoInput);}else{this.micSource.disconnect(this.input);this.micSource.disconnect(this.echoInput);}}this.onChange();}
   panic(){this.holding=false;this.cloudHolding=false;this.inputCut=false;this.releasePerformance();this.setParam('feedback',.25);this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}this.onNotice('Echo, cloud and reverb cleared. Feedback reset.');}
-  async bounce(index:number){const take=this.takes[0];if(!take)return;await this.importFile(new File([take.blob],`${take.name} bounce.wav`,{type:'audio/wav'}),index);}
+  async bounce(index:number){const take=this.takes[0];if(!take)return;await this.importFile(new File([await this.takeWav(take)],`${take.name} bounce.wav`,{type:'audio/wav'}),index);}
 }

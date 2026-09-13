@@ -7,6 +7,7 @@ const context=await browser.newContext();
 const page=await context.newPage();
 try{
   await page.goto(url);await page.getByText('Saved on this device',{exact:true}).waitFor();
+  assert(await page.evaluate(()=>crossOriginIsolated),'Hosted app enables the shared recording buffer');
   await page.waitForFunction(()=>navigator.serviceWorker.controller,undefined,{timeout:15000});
   const cache=await page.evaluate(async()=>{const keys=await caches.keys();const cache=await caches.open(keys.find(k=>k.startsWith('magnetic-')));const response=await cache.match('/');return {cached:!!response,redirected:response?.redirected};});
   assert(cache.cached,'Canonical app document is precached');assert.equal(cache.redirected,false,'Offline document must not be a redirected response');
@@ -14,6 +15,8 @@ try{
   await page.getByRole('button',{name:'Open library for track 1',exact:true}).click();await page.getByRole('button',{name:/Soft keys/}).click();
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));
+  await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(350);await page.getByRole('button',{name:'Stop & save take',exact:true}).click();
+  await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();const exported=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).click();await exported;
   await page.getByRole('button',{name:'Pause playback',exact:true}).click();
-  console.log('PASS Hosted app reloads and plays audio offline, without redirected cache responses');
+  console.log('PASS Hosted app uses shared memory, reloads, plays, records and exports offline, without redirected cache responses');
 }finally{await browser.close();}

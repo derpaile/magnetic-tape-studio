@@ -6,6 +6,7 @@ class MemoryCloud {
     this.pos = 0; this.filled = 0; this.hold = false; this.phase = 0; this.clock = 0; this.seed = 7129;
     this.voices = Array.from({length:32}, () => ({pos:0, age:0, length:0, rate:1, pan:0}));
     this.window = Float32Array.from({length:1025}, (_, i) => .5 - .5 * Math.cos(2 * Math.PI * i / 1024));
+    this.audible = false; this.grainLength = 0; this.overlap = 3;
     this.output = [0,0]; this.values = [0,.24,1.5,.35,.15,0]; this.keys = ['dissolve','grainSize','memory','scatter','wander','return'];
     this.motion = 'idle'; this.motionFrames = 0; this.motionSamples = 0;
     this.movements = new Float32Array(512 * 6); this.telemetry = 0;
@@ -31,10 +32,15 @@ class MemoryCloud {
     } else for (let k=0;k<6;k++) this.values[k] += (p[this.keys[k]][0]-this.values[k])*.08;
     if (this.motion !== 'idle') this.motionSamples += frames;
     this.telemetry += frames;
+    const audible=this.values[0]>.0001||this.values[5]>.0001;
+    if(this.audible&&!audible)for(const voice of this.voices)voice.length=0;
+    if(!this.audible&&audible)this.clock=0;
+    this.audible=audible;
+    this.grainLength = Math.round(this.values[1]*sampleRate); this.overlap = 3+this.values[0]*9;
   }
-  read(c, pos) { const r = (pos % this.size + this.size) % this.size, a = Math.floor(r), f = r-a; return this.memory[c][a]*(1-f)+this.memory[c][(a+1)%this.size]*f; }
+  read(c, pos) { const r = pos<0?pos+this.size:pos>=this.size?pos-this.size:pos, a = Math.floor(r), f = r-a; return this.memory[c][a]*(1-f)+this.memory[c][(a+1)%this.size]*f; }
   process(left, right) {
-    const [dissolve, grainSize, memory, scatter, wander] = this.values;
+    const memory=this.values[2], scatter=this.values[3], wander=this.values[4];
     if (!this.hold) {
       this.memory[0][this.pos] = left; this.memory[1][this.pos] = right;
       const bin = Math.min(63, Math.floor(this.pos/this.size*64)); if (bin !== this.peakBin) { this.peaks[bin] = 0; this.peakBin = bin; }
@@ -42,10 +48,12 @@ class MemoryCloud {
       this.pos = (this.pos+1)%this.size; this.filled = Math.min(this.size, this.filled+1);
     }
     this.phase += 1/sampleRate;
-    const length = Math.round(grainSize*sampleRate), overlap = 3+dissolve*9;
+    // Keep listening at zero dissolve, but don't render 32 inaudible voices.
+    if (!this.audible) { this.output[0]=this.output[1]=0; return; }
+    const length = this.grainLength, overlap = this.overlap;
     if (--this.clock <= 0 && this.filled > length*2+128) {
       this.clock = Math.max(128, length/overlap*(.85+this.random()*.3));
-      const voice = this.voices.find(v => v.age >= v.length);
+      let voice; for (let k=0;k<this.voices.length;k++) if (this.voices[k].age>=this.voices[k].length) { voice=this.voices[k]; break; }
       if (voice) {
         const safe = length*1.1+128;
         const drift = Math.sin(this.phase*.19)*wander*sampleRate*4;
@@ -58,7 +66,7 @@ class MemoryCloud {
     for (const v of this.voices) if (v.age < v.length) {
       const envelope = this.window[Math.min(1024, Math.floor(v.age/v.length*1024))];
       l += this.read(0,v.pos)*envelope*(1-v.pan); r += this.read(1,v.pos)*envelope*(1+v.pan); weight += envelope;
-      v.pos = (v.pos+v.rate)%this.size; v.age++;
+      v.pos += v.rate; if(v.pos>=this.size)v.pos-=this.size; v.age++;
     }
     // Never divide by a near-zero window: attacks and releases remain soft.
     const norm = Math.max(2,weight); this.output[0] = l/norm; this.output[1] = r/norm;
@@ -66,7 +74,7 @@ class MemoryCloud {
   report(port) {
     if (this.telemetry < sampleRate/10) return; this.telemetry = 0;
     const peaks = Array.from({length:64}, (_, i) => this.peaks[(Math.floor(this.pos/this.size*64)+i+1)%64]);
-    const grains = this.voices.filter(v=>v.age<v.length).map(v=>({x:1-((this.pos-v.pos+this.size)%this.size)/this.size, life:Math.sin(Math.PI*v.age/v.length)}));
+    const grains = this.voices.filter(v=>this.audible&&v.age<v.length).map(v=>({x:1-((this.pos-v.pos+this.size)%this.size)/this.size, life:Math.sin(Math.PI*v.age/v.length)}));
     port.postMessage({type:'cloud',peaks,grains,filled:this.filled/sampleRate,hold:this.hold,motion:this.motion,motionDuration:this.motionFrames/32,values:this.values});
   }
 }
@@ -97,7 +105,7 @@ class TapeProcessor extends AudioWorkletProcessor {
     };
   }
   random(){this.seed=(Math.imul(this.seed,1664525)+1013904223)|0;return (this.seed>>>0)/2147483648-1;}
-  read(buffer,position,size){const r=(position+size*2)%size,a=Math.floor(r),f=r-a;return buffer[a]*(1-f)+buffer[(a+1)%size]*f;}
+  read(buffer,position,size){const r=position<0?position+size:position>=size?position-size:position,a=Math.floor(r),f=r-a;return buffer[a]*(1-f)+buffer[(a+1)%size]*f;}
   process(inputs,outputs,p){
     const out=outputs[0],input=inputs[0]||[],send=inputs.length>1?inputs[1]:input;
     const enabled=p.enabled[0],mix=p.mix[0]*enabled,drive=1+p.drive[0]*4.5;
@@ -105,7 +113,8 @@ class TapeProcessor extends AudioWorkletProcessor {
     const dryAlpha=1-Math.exp(-2*Math.PI*(14000-p.age[0]*10000)/sampleRate),hpCoeff=Math.exp(-2*Math.PI*p.lowCut[0]/sampleRate);
     const targets=[p.time[0]*sampleRate,p.head2[0]*sampleRate,p.head3[0]*sampleRate],feedback=this.swell?1.065:p.feedback[0],spread=p.spread[0];
     const slew=1-Math.exp(-1/(sampleRate*.16)),smooth=1-Math.exp(-1/(sampleRate*.015));
-    const dryLevel=Math.cos(mix*Math.PI/2),wetLevel=Math.sin(mix*Math.PI/2);
+    const dryLevel=Math.cos(mix*Math.PI/2),wetLevel=Math.sin(mix*Math.PI/2),bias=p.drive[0]*.12,biasDC=Math.tanh(bias);
+    const wowDepth=.0025*p.wow[0]*sampleRate,flutterDepth=.00045*p.flutter[0]*sampleRate,crinkleDepth=.003*p.crinkle[0]*sampleRate;
     this.cloud.begin(p,out[0].length);
     const dissolved=this.cloud.values[0]*enabled,tapeLevel=Math.cos(dissolved*Math.PI/2),cloudLevel=Math.sin(dissolved*Math.PI/2),cloudReturn=this.cloud.values[5]*enabled;
     for(let i=0;i<out[0].length;i++){
@@ -114,7 +123,7 @@ class TapeProcessor extends AudioWorkletProcessor {
       this.dust+=(this.dustTarget-this.dust)*.001;
       const wow=Math.sin(this.phase*2*Math.PI*.63)+.32*Math.sin(this.phase*2*Math.PI*.17);
       const flutter=Math.sin(this.phase*2*Math.PI*7.13)+.3*Math.sin(this.phase*2*Math.PI*13.7);
-      const movement=(wow*.0025*p.wow[0]+flutter*.00045*p.flutter[0]+this.dust*.003*p.crinkle[0])*sampleRate;
+      const movement=wow*wowDepth+flutter*flutterDepth+this.dust*crinkleDepth;
       const wear=1-this.dust*p.crinkle[0]*1.1;
       this.holdMix+=((this.hold?1:0)-this.holdMix)*smooth;
       this.feed+=((this.inputCut||this.hold?0:1)-this.feed)*smooth;
@@ -137,8 +146,7 @@ class TapeProcessor extends AudioWorkletProcessor {
         this.tape[c][this.pos]=Math.tanh(written*drive)/drive*wear+noise*.3;
         this.dryTape[c][this.dryPos]=dry;
         const magnetic=this.read(this.dryTape[c],this.dryPos-sampleRate*.006-movement,this.drySize);
-        const bias=p.drive[0]*.12;
-        const saturated=(Math.tanh(magnetic*drive+bias)-Math.tanh(bias))/drive;
+        const saturated=(Math.tanh(magnetic*drive+bias)-biasDC)/drive;
         this.dryLP[c]+=dryAlpha*(saturated-this.dryLP[c]);
         const tapeDry=(this.dryLP[c]*.8+magnetic*.2)*wear+noise;
         const wet=this.wet[c]*(1-this.holdMix)+held*this.holdMix;
@@ -169,39 +177,46 @@ class SpaceProcessor extends AudioWorkletProcessor {
 }
 registerProcessor('magnetic-space',SpaceProcessor);
 
-/* Capture uncompressed stereo PCM, with an acknowledged stop and bounded duration. */
+/* Never wait, encode or grow storage on the audio callback. */
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
-    super(); this.active = false; this.count = 0; this.total = 0;
-    this.limit = Math.round(sampleRate * (options?.processorOptions?.maxSeconds || 600));
-    this.sink = this.port; this.pool = Array.from({length:8},()=>[new Float32Array(8192),new Float32Array(8192)]);
-    this.chunk = [new Float32Array(8192), new Float32Array(8192)];
-    this.port.onmessage = ({data}) => {
-      if (data.sink) { this.sink=data.sink;this.sink.onmessage=({data:m})=>{if(m.type==='recycle'&&this.pool.length<16)this.pool.push([m.left,m.right]);}; }
-      if (data === 'start' && !this.active) { this.count = 0; this.total = 0; this.active = true; this.sink.postMessage({type:'started'}); }
-      if (data === 'stop') this.finish();
+    super(); this.active=false; this.count=0; this.total=0; this.interrupted=false;
+    this.limit=Math.round(sampleRate*(options?.processorOptions?.maxSeconds||600));
+    this.sink=this.port; this.state=null; this.ring=null; this.capacity=0;
+    this.pool=Array.from({length:options?.processorOptions?.maxSeconds>600?64:0},()=>[new Float32Array(8192),new Float32Array(8192)]);
+    this.chunk=[new Float32Array(8192),new Float32Array(8192)];
+    this.port.onmessage=({data})=>{
+      if(data.shared){this.state=new Int32Array(data.shared.state);this.ring=new Float32Array(data.shared.audio);this.capacity=this.ring.length/2;this.pool=[];}
+      if(data.sink){this.sink=data.sink;this.sink.onmessage=({data:m})=>{if(m.type==='recycle'&&this.pool.length<64)this.pool.push([m.left,m.right]);};}
+      if(data==='start'&&!this.active){this.count=0;this.total=0;this.interrupted=false;if(this.state){Atomics.store(this.state,0,0);Atomics.store(this.state,1,0);}else if(!this.chunk)this.chunk=this.pool.pop()||[new Float32Array(8192),new Float32Array(8192)];this.active=true;this.sink.postMessage({type:'started'});}
+      if(data==='stop')this.finish();
     };
   }
-  flush() {
-    if (!this.count) return;
-    const direct = this.sink !== this.port;
-    const left = direct ? this.chunk[0] : this.chunk[0].slice(0, this.count), right = direct ? this.chunk[1] : this.chunk[1].slice(0, this.count);
-    this.sink.postMessage({ type: 'chunk', left, right, frames:this.count }, [left.buffer, right.buffer]);
-    if (direct) this.chunk = this.pool.pop() || [new Float32Array(8192),new Float32Array(8192)];
-    this.count = 0;
+  flush(){
+    if(!this.count)return;
+    const direct=this.sink!==this.port;
+    const left=direct?this.chunk[0]:this.chunk[0].slice(0,this.count),right=direct?this.chunk[1]:this.chunk[1].slice(0,this.count);
+    this.sink.postMessage({type:'chunk',left,right,frames:this.count},[left.buffer,right.buffer]);
+    this.count=0;
+    if(direct){this.chunk=this.pool.pop();if(!this.chunk&&this.active){this.interrupted=true;this.finish();}}
   }
-  finish() { if (!this.active) return; this.active = false; this.flush(); this.sink.postMessage({type:'done', frames:this.total,limited:this.total>=this.limit}); }
-  process(inputs, outputs) {
-    const input = inputs[0], output = outputs[0];
-    for (let c = 0; c < output.length; c++) if (input[c] || input[0]) output[c].set(input[c] || input[0]);
-    if (this.active) for (let i = 0; i < output[0].length; i++) {
-      this.chunk[0][this.count] = input[0]?.[i] || 0;
-      this.chunk[1][this.count] = input[1]?.[i] ?? input[0]?.[i] ?? 0;
-      this.count++; this.total++;
-      if (this.count === 8192) this.flush();
-      if (this.total >= this.limit) { this.finish(); break; }
+  finish(){if(!this.active)return;this.active=false;this.flush();this.sink.postMessage({type:'done',frames:this.total,limited:this.total>=this.limit,interrupted:this.interrupted});}
+  process(inputs,outputs){
+    const input=inputs[0],output=outputs[0],left=input[0],right=input[1]||left;
+    for(let c=0;c<output.length;c++)if(input[c]||left)output[c].set(input[c]||left);
+    if(!this.active)return true;
+    const count=Math.min(output[0].length,this.limit-this.total);
+    if(this.state){
+      const read=Atomics.load(this.state,1);
+      if(this.total-read+count>this.capacity){this.interrupted=true;this.finish();return true;}
+      for(let i=0;i<count;i++){const at=(this.total+i)%this.capacity;this.ring[at]=left?.[i]||0;this.ring[this.capacity+at]=right?.[i]||0;}
+      this.total+=count;Atomics.store(this.state,0,this.total);
+    }else for(let i=0;i<count&&this.active;i++){
+      this.chunk[0][this.count]=left?.[i]||0;this.chunk[1][this.count]=right?.[i]||0;
+      this.count++;this.total++;if(this.count===8192)this.flush();
     }
+    if(this.total>=this.limit)this.finish();
     return true;
   }
 }
-registerProcessor('magnetic-capture', CaptureProcessor);
+registerProcessor('magnetic-capture',CaptureProcessor);

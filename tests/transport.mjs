@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 import assert from 'node:assert/strict';
 const exported={};
-vm.runInNewContext(ts.transpileModule(readFileSync('src/audio.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:exported,Float32Array,Blob,performance});
+vm.runInNewContext(ts.transpileModule(readFileSync('src/audio.ts','utf8').replaceAll('import.meta.url', '"file:///src/audio.ts"'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:exported,Float32Array,Blob,performance});
 const param=()=>({value:1,setValueAtTime(v){this.value=v;},linearRampToValueAtTime(v){this.value=v;},cancelScheduledValues(){},setTargetAtTime(v){this.value=v;}});
 let allocations=0;
 const ctx={currentTime:0,createBuffer(c,n,sr){allocations++;const channels=Array.from({length:c},()=>new Float32Array(n));return {duration:n/sr,getChannelData:c=>channels[c]};},createGain(){return {gain:param(),connect(){},disconnect(){}};},createBufferSource(){return {playbackRate:param(),connect(){},disconnect(){},start(at,offset){this.at=at;this.offset=offset;},stop(){}};}};
@@ -31,3 +31,15 @@ console.log('PASS Imports and global loop changes preserve independent loops and
 const h2=engine.headTimes[1];engine.setHeadTime(2,1.23);engine.setHeadTime(0,.18);assert.equal(engine.headTimes[1],h2);assert.equal(engine.headTimes[2],1.23);engine.setHeadSync(1,true,'1/4 D');engine.setTempo(100);assert(Math.abs(engine.headTimes[1]-.9)<1e-10);assert.equal(engine.headTimes[2],1.23);engine.setHeadTime(1,.72);assert.equal(engine.headTiming[0].sync,false);
 const existingSource=looping.sources.find(s=>s.index===0).node;const pBefore=looping.trackPosition(0);looping.setClip(3,{name:'Long sample',sampleRate:24000,channels:[new Float32Array(24000*30),new Float32Array(24000*30)]});assert.equal(looping.sources.find(s=>s.index===0).node,existingSource,'Imports leave independent loops running');assert.equal(looping.trackPosition(0),pBefore);looping.setClip(3,null);assert.equal(looping.sources.find(s=>s.index===0).node,existingSource,'Deleting another track leaves independent loops running');
 console.log('PASS Independent head times and tempo, empty startup, uninterrupted loops across loading/deleting longer files');
+
+const follower=new exported.TapeEngine();follower.ctx=ctx;follower.init=async()=>{};follower.tracks[0].clip=exported.createDemo('Soft keys');await follower.play();ctx.currentTime=follower.startedAt+23.7;
+const originalPhase=follower.trackPosition(0);
+follower.setClip(3,{name:'Long import',sampleRate:24000,channels:[new Float32Array(24000*30)]});
+assert(Math.abs(follower.trackPosition(0)-originalPhase)<1e-7,'A longer import preserves the current Follow tape phase after multiple laps');
+assert(Math.abs(follower.sources[0].node.offset-(originalPhase+.025))<1e-7,'The audible replacement starts at the same tape position');
+follower.toggleLoop();assert(Math.abs(follower.trackPosition(0)-originalPhase)<1e-7);
+follower.toggleLoop();assert(Math.abs(follower.trackPosition(0)-originalPhase)<1e-7);
+follower.undo();assert(Math.abs(follower.trackPosition(0)-originalPhase)<1e-7,'Undo preserves the current lap too');
+console.log('PASS Follow tape phase survives reel-length changes, loop toggles and undo after multiple laps');
+
+follower.toggleLoop();ctx.currentTime+=40;const finishedPosition=follower.transportPosition-follower.tapeOrigin;follower.setClip(2,{name:'Long one shot',sampleRate:24000,channels:[new Float32Array(24000*90)]});assert(follower.trackPosition(0)>=10,'Loading with Full tape loop off does not restart finished tape audio');assert(Math.abs(follower.trackPosition(0)-finishedPosition)<1e-7);

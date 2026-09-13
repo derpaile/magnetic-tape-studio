@@ -35,11 +35,45 @@ cap.port.onmessage({data:'start'});assert.equal(cap.total,0);assert(cap.active);
 console.log('PASS Exact 30-minute sample boundary, partial final block, one acknowledgement and fresh restart');
 
 const workerMessages=[],returned=[],source={postMessage:m=>returned.push(m)},self={postMessage:m=>workerMessages.push(m)};
-vm.runInNewContext(readFileSync('public/audio/recorder-worker.js','utf8'),{self,Blob,ArrayBuffer,DataView,Math});
+vm.runInNewContext(readFileSync('public/audio/recorder-worker.js','utf8'),{self,Blob,Float32Array,ArrayBuffer,DataView,Math,clearInterval,setInterval});
 self.onmessage({data:{source,sampleRate:48000}});source.onmessage({data:{type:'started'}});
 source.onmessage({data:{type:'chunk',left:new Float32Array([.5,-.5,1,1]),right:new Float32Array([-.25,.25,1,1]),frames:2}});
 source.onmessage({data:{type:'done',frames:2,limited:false}});
-const take=workerMessages.find(m=>m.type==='take'),bytes=Buffer.from(await take.blob.arrayBuffer());
-assert.equal(bytes.length,52);assert.equal(bytes.readUInt32LE(40),8);assert.equal(bytes.readUInt32LE(24),48000);assert.equal(bytes.readInt16LE(44),16383);assert.equal(bytes.readInt16LE(46),-8192);assert.equal(bytes.readInt16LE(48),-16384);assert.equal(returned.length,1);
-source.onmessage({data:{type:'started'}});source.onmessage({data:{type:'done',frames:0}});assert.equal(workerMessages.at(-1).blob.size,44,'Next take does not retain previous audio');
-console.log('PASS Background WAV encoder preserves stereo PCM, partial lengths and recycles buffers');
+const take=workerMessages.find(m=>m.type==='take');
+assert.equal(take.blob.size,16);assert.equal(take.blob.type,'application/x-magnetic-pcm');assert.equal(returned.length,1);
+const exported=[],encoder={postMessage:m=>exported.push(m)};
+vm.runInNewContext(readFileSync('public/audio/wav-worker.js','utf8'),{self:encoder,Blob,ArrayBuffer,DataView,Float32Array,Math});
+await encoder.onmessage({data:take});
+const bytes=Buffer.from(await exported[0].blob.arrayBuffer());
+assert.equal(bytes.length,52);assert.equal(bytes.readUInt32LE(40),8);assert.equal(bytes.readUInt32LE(24),48000);assert.equal(bytes.readInt16LE(44),16383);assert.equal(bytes.readInt16LE(46),-8192);assert.equal(bytes.readInt16LE(48),-16384);
+source.onmessage({data:{type:'started'}});source.onmessage({data:{type:'done',frames:0}});assert.equal(workerMessages.at(-1).blob.size,0,'Next take does not retain previous audio');
+console.log('PASS Raw stereo capture, on-demand WAV, partial lengths and recycled buffers');
+
+// The shared ring is sample-exact across wraps, including a stalled consumer.
+const shared={state:new SharedArrayBuffer(16),audio:new SharedArrayBuffer(32768*2*4)},state=new Int32Array(shared.state);
+const captured=[],ringSource={postMessage(){}},ringWorker={postMessage:m=>captured.push(m)};
+let poll;
+vm.runInNewContext(readFileSync('public/audio/recorder-worker.js','utf8'),{self:ringWorker,Blob,Float32Array,Int32Array,Atomics,setInterval:fn=>{poll=fn;return 1;},clearInterval(){}});
+ringWorker.onmessage({data:{source:ringSource,sampleRate:48000,shared}});
+const ringCap=new Capture({processorOptions:{maxSeconds:1800}});
+ringCap.port.onmessage({data:{shared}});
+ringCap.port.onmessage({data:{sink:{postMessage:m=>ringSource.onmessage({data:m})}}});
+ringCap.port.onmessage({data:'start'});
+let total=0;
+for(let pass=0;pass<9;pass++){
+  for(let block=0;block<187;block++){
+    const left=Float32Array.from({length:128},(_,i)=>Math.sin((total+i)*.013)*.6),right=Float32Array.from(left,x=>-x);
+    ringCap.process([[left,right]],[[new Float32Array(128),new Float32Array(128)]]);total+=128;
+  }
+  poll();
+}
+ringCap.port.onmessage({data:'stop'});
+const ringTake=captured.find(m=>m.type==='take');assert.equal(ringTake.pcm.frames,total);assert(!ringTake.interrupted);
+await encoder.onmessage({data:ringTake});const rendered=Buffer.from(await exported.at(-1).blob.arrayBuffer());
+for(let i=0;i<total;i++){const expected=Math.sin(i*.013)*.6;assert(Math.abs(rendered.readInt16LE(44+i*4)/32768-expected)<.00006);assert(Math.abs((rendered.readInt16LE(44+i*4)+rendered.readInt16LE(46+i*4))/32768)<.00006);}
+ringCap.port.onmessage({data:'start'});
+for(let i=0;i<258;i++)ringCap.process([[new Float32Array(128).fill(.25)]],[[new Float32Array(128),new Float32Array(128)]]);
+assert(!ringCap.active);assert(captured.at(-1).interrupted);assert.equal(captured.at(-1).frames,32768,'Overflow stops before overwriting captured audio');
+ringCap.port.onmessage({data:'start'});assert.equal(state[0],0);assert.equal(state[1],0);ringCap.port.onmessage({data:'stop'});
+await encoder.onmessage({data:{blob:new Blob([]),pcm:{frames:2,sampleRate:48000,chunkFrames:8192}}});assert(exported.at(-1).error);
+console.log('PASS Shared-ring wrap, stalled consumer, exact export, safe overflow, restart and corrupt-take detection');
