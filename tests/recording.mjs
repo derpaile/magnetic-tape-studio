@@ -31,7 +31,7 @@ try{for(const fallback of [false,true]){
   await page.getByLabel('Import audio files',{exact:true}).setInputFiles({name:'Continuous tone.wav',mimeType:'audio/wav',buffer:wav(4,220)});
   await page.getByRole('button',{name:'Select track 1: Continuous tone',exact:true}).waitFor();
   await page.getByRole('button',{name:'Loop track 1',exact:true}).click();
-  await page.getByRole('switch',{name:'Echo circuit',exact:true}).click();
+  await page.getByRole('switch',{name:'All effects',exact:true}).click();
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(500);
   await page.evaluate(()=>window.__originalTrackSource=window.__trackSources.at(-1));
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(400);

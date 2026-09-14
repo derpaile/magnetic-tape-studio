@@ -104,7 +104,8 @@ export class TapeEngine {
   get headTimes(){return [this.params.time,...this.headTiming.map(h=>h.time)];}
   get duration(){return Math.max(1,...this.tracks.map(t=>t.clip?t.clip.channels[0].length/t.clip.sampleRate:0));}
   get hasUndo(){return this.undoStack.length>0;}
-  get repeats(){return this.loop||this.tracks.some(t=>t.clip&&t.mode==='loop');}
+  clearUndo(){this.undoStack=[];}
+  get repeats(){return this.tracks.some(t=>t.clip&&(t.mode==='loop'||(t.mode==='tape'&&this.loop)));}
   get transportPosition(){
     if(!this.playing||!this.ctx)return this.position;
     const dt=Math.max(0,this.ctx.currentTime-this.startedAt),r=this.speedRamp;
@@ -200,7 +201,7 @@ export class TapeEngine {
       if(t.mode==='loop'){const from=Math.round(start*clip.sampleRate),to=Math.min(out.length,Math.round(end*clip.sampleRate)),fade=Math.min(Math.floor((to-from)/2),Math.ceil(clip.sampleRate*.003));for(let j=0;j<fade;j++){out[from+j]*=j/fade;out[to-1-j]*=j/fade;}}
     }this.bufferCache.set(clip,{key,buffer:b});return b;
   }
-  async play(){await this.init();if(this.playing)return;if(!this.repeats&&this.position>=this.duration+this.tapeOrigin){this.position=0;this.tapeOrigin=0;}this.motorSpeed=this.braking?.025:this.speed;this.playing=true;this.startSources();this.onChange();}
+  async play(){if(!this.tracks.some(t=>t.clip)){this.onNotice('Add audio, choose a sound from the library, or play the starter mix.');return;}await this.init();if(this.playing)return;if(!this.repeats&&this.position>=this.duration+this.tapeOrigin){this.position=0;this.tapeOrigin=0;}this.motorSpeed=this.braking?.025:this.speed;this.playing=true;this.startSources();this.onChange();}
   private startSources(indices=this.tracks.map((_,i)=>i),replace=false){
     // Prepare every buffer while existing sources are still audible. Start the
     // crossfade only after allocation/copying finishes, on the audio clock.
@@ -220,7 +221,7 @@ export class TapeEngine {
     });
     this.sources=[...this.sources,...added].sort((a,b)=>a.index-b.index);
   }
-  pause(){if(!this.playing)return;this.position=this.transportPosition;this.stopSources();this.playing=false;this.onChange();}
+  pause(){if(!this.playing)return;this.position=this.transportPosition;this.stopSources();this.playing=false;this.braking=false;this.motorSpeed=this.speed;this.speedRamp=null;this.onChange();}
   private stopSources(indices=this.tracks.map((_,i)=>i),at=this.ctx!.currentTime){for(const {node,fade,index} of this.sources){if(!indices.includes(index))continue;if(fade.gain.cancelAndHoldAtTime)fade.gain.cancelAndHoldAtTime(at);else{fade.gain.cancelScheduledValues(at);fade.gain.setValueAtTime(fade.gain.value,at);}fade.gain.linearRampToValueAtTime(0,at+.025);node.stop(at+.026);}this.sources=this.sources.filter(s=>!indices.includes(s.index));}
   stop(){this.pause();this.position=0;this.tapeOrigin=0;this.onChange();}
   seek(position:number){this.tapeOrigin=0;this.position=Math.max(0,Math.min(this.duration-.001,position));if(this.playing){this.stopSources();this.startSources();}this.onChange();}
@@ -230,7 +231,7 @@ export class TapeEngine {
     this.position=this.transportPosition;this.motorSpeed=value;
     if(this.playing){this.startedAt=now;this.speedRamp={from,to:value,at:now,duration};for(const {node} of this.sources){node.playbackRate.cancelScheduledValues(now);node.playbackRate.setValueAtTime(from,now);node.playbackRate.linearRampToValueAtTime(value,now+duration);}}else this.speedRamp=null;
   }
-  setSpeed(value:number){this.speed=Math.max(.25,Math.min(2,value));if(!this.braking)this.rampSpeed(this.speed,.08);this.onChange();}
+  setSpeed(value:number){if(!Number.isFinite(value))return;this.speed=Math.max(.25,Math.min(2,value));if(!this.braking)this.rampSpeed(this.speed,.08);this.onChange();}
   toggleLoop(){if(this.loop)this.tapeOrigin=this.transportPosition-this.currentPosition;this.loop=!this.loop;this.restart();this.onChange();}
   setTrackMode(i:number,mode:Track['mode']){this.remember(i);this.tracks[i].mode=mode;this.restart([i]);this.onChange();}
   setLoopBounds(i:number,start:number,end:number){if(!Number.isFinite(start)||!Number.isFinite(end))return;const t=this.tracks[i];if(!t.clip)return;this.remember(i);const length=t.clip.channels[0].length/t.clip.sampleRate,min=Math.min(.02,length);t.loopEnd=Math.max(min,Math.min(length,end));t.loopStart=Math.max(0,Math.min(start,t.loopEnd-min));t.mode='loop';this.restart([i]);this.onChange();}
@@ -304,7 +305,7 @@ export class TapeEngine {
     // Share concurrent requests, then release the extra WAV memory.
     try{return await job;}finally{this.wavJobs.delete(take.blob);}
   }
-  async startMaster(){await this.init();this.auditionOriginal(false);this.applyMicSettings();if(this.recorderFailed)throw new Error('Reload the studio before recording again.');if(this.recording||this.masterSaving)return;if(this.captureState)this.captureState.fill(0);this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
+  async startMaster(){if(this.recording||this.masterSaving)return;await this.init();this.auditionOriginal(false);this.applyMicSettings();if(this.recorderFailed)throw new Error('Reload the studio before recording again.');if(this.recording||this.masterSaving)return;if(this.captureState)this.captureState.fill(0);this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
   async stopMaster(){if(this.tailTimer)clearTimeout(this.tailTimer);this.tailTimer=null;this.tailSaving=false;if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterSaving=true;this.onChange();this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{if(!this.recording){resolve();return;}this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;this.masterSaving=false;}}
   auditionOriginal(active:boolean){
     if(!this.ctx||!this.auditionWet||!this.auditionDry||!this.inputAnalyser)return;

@@ -7,12 +7,14 @@ const context=await browser.newContext();
 const page=await context.newPage();
 try{
   await page.goto(url);await page.getByText('Saved on this device',{exact:true}).waitFor();
+  assert(await page.getByRole('switch',{name:'All effects',exact:true}).isVisible(),'Published release has the updated studio');
   assert(await page.evaluate(()=>crossOriginIsolated),'Hosted app enables the shared recording buffer');
   await page.waitForFunction(()=>navigator.serviceWorker.controller,undefined,{timeout:15000});
   const cache=await page.evaluate(async()=>{const keys=await caches.keys();const cache=await caches.open(keys.find(k=>k.startsWith('magnetic-')));const response=await cache.match('/');return {cached:!!response,redirected:response?.redirected};});
   assert(cache.cached,'Canonical app document is precached');assert.equal(cache.redirected,false,'Offline document must not be a redirected response');
   await context.setOffline(true);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Open library for track 1',exact:true}).click();await page.getByRole('button',{name:/Soft keys/}).click();
+  await page.getByRole('button',{name:'Select track 1: Soft keys',exact:true}).waitFor();
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(350);await page.getByRole('button',{name:'Stop & save take',exact:true}).click();

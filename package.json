@@ -1,14 +1,14 @@
 {
   "name": "magnetic-tape-studio",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
-    "test:e2e": "node tests/audio.mjs && node tests/memory.mjs && node tests/transport.mjs && node tests/export.mjs && node tests/browser.mjs && node tests/recording.mjs && node tests/live-export.mjs",
+    "test:e2e": "node tests/audio.mjs && node tests/memory.mjs && node tests/transport.mjs && node tests/session.mjs && node tests/export.mjs && node tests/browser.mjs && node tests/workflow.mjs && node tests/recording.mjs && node tests/live-export.mjs",
     "test:release": "node tests/release.mjs",
     "prebuild": "node scripts/prepare-codecs.mjs",
     "predev": "node scripts/prepare-codecs.mjs"

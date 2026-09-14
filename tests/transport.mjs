@@ -43,3 +43,9 @@ follower.undo();assert(Math.abs(follower.trackPosition(0)-originalPhase)<1e-7,'U
 console.log('PASS Follow tape phase survives reel-length changes, loop toggles and undo after multiple laps');
 
 follower.toggleLoop();ctx.currentTime+=40;const finishedPosition=follower.transportPosition-follower.tapeOrigin;follower.setClip(2,{name:'Long one shot',sampleRate:24000,channels:[new Float32Array(24000*90)]});assert(follower.trackPosition(0)>=10,'Loading with Full tape loop off does not restart finished tape audio');assert(Math.abs(follower.trackPosition(0)-finishedPosition)<1e-7);
+
+const oneShot=new exported.TapeEngine();oneShot.ctx=ctx;oneShot.init=async()=>{};oneShot.tracks[0].clip=exported.createDemo('Soft keys');oneShot.tracks[0].mode='once';
+assert(!oneShot.repeats,'Full tape loop does not keep one-shot-only sessions running forever');await oneShot.play();ctx.currentTime=oneShot.startedAt+11;oneShot.tick();assert(!oneShot.playing);
+const empty=new exported.TapeEngine();let initialized=false;empty.init=async()=>{initialized=true;};await empty.play();assert(!initialized&&!empty.playing,'Empty playback gives guidance without starting audio');
+oneShot.tracks[0].mode='tape';await oneShot.play();oneShot.brake(true);ctx.currentTime+=.4;oneShot.pause();assert(!oneShot.braking);assert.equal(oneShot.motorSpeed,oneShot.speed);await oneShot.play();assert.equal(oneShot.sources[0].node.playbackRate.value,1,'Pause releases the motor brake before the next play');
+console.log('PASS Empty tape guidance, one-shot auto-stop with global loop enabled, and brake release across pause/resume');

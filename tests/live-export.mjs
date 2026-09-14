@@ -18,7 +18,7 @@ const exportFile=async(format,path)=>{await button('Export latest take').click()
 try{
  await page.goto(base);await page.getByText('Saved on this device',{exact:true}).waitFor();
  await page.getByLabel('Selected track input source',{exact:true}).selectOption('mic');await page.getByLabel('Live microphone waveform',{exact:true}).waitFor();
- await page.getByRole('switch',{name:'Echo circuit',exact:true}).click();await page.waitForTimeout(500);assert((await rms())<.0001,'Live input is silent before monitoring');
+ await page.getByRole('switch',{name:'All effects',exact:true}).click();await page.waitForTimeout(500);assert((await rms())<.0001,'Live input is silent before monitoring');
  await button('Monitor microphone').click();await page.waitForTimeout(500);assert((await rms())>.025,'Live monitoring works without recording or transport');
  await button('Mute track 1').click();await page.waitForTimeout(500);assert((await rms())<.0001,'Mic follows lane mute');await button('Mute track 1').click();
  await button('Solo track 2').click();await page.waitForTimeout(500);assert((await rms())<.0001,'Mic follows another lane solo');await button('Solo track 2').click();

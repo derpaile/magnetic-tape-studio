@@ -14,20 +14,22 @@ const pass=name=>{checks.push(name);process.stdout.write(`PASS ${name}\n`);};
 function wav(){const sr=24000,frames=sr*3,b=Buffer.alloc(44+frames*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(sr,24);b.writeUInt32LE(sr*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(frames*2,40);for(let i=0;i<frames;i++){const t=i/sr;const s=t<.15?Math.sin(t*Math.PI*440*2)*Math.exp(-t*20)*.5:0;b.writeInt16LE(Math.round(s*32767),44+i*2);}return b;}
 try{
   await page.goto(base);await page.getByText('Saved on this device',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('slider').count(),33);
+  await page.getByRole('button',{name:'Show all sound tools',exact:true}).click();
+  assert(await page.getByRole('slider',{name:'Dissolve',exact:true}).isVisible());
+  assert(!await page.getByLabel('Loop start position',{exact:true}).isVisible(),'Splice editing stays hidden on an empty tape');
   assert.equal(await page.getByRole('button',{name:/Select track [1-4]: Empty tape/}).count(),4);
   await page.screenshot({path:'test-results/desktop.png',fullPage:true});
-  pass('Empty desktop studio and 33 accessible controls');
+  pass('Empty desktop studio with optional sound tools and contextual loop editing');
   for(const size of [{width:1440,height:900},{width:1366,height:768},{width:1280,height:800}]){
     await page.setViewportSize(size);
-    const cabinet=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth,top:document.querySelector('.instrument').getBoundingClientRect().top,panels:['.mechanical-bay','.control-panel','.tape-recorder','.character-rack','.performance-strip','.cloud-panel','.master-recorder'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {selector,x:r.x,y:r.y,right:r.right,bottom:r.bottom};})}));
+    const cabinet=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth,top:document.querySelector('.instrument').getBoundingClientRect().top,panels:['.mechanical-bay','.control-panel','.tape-recorder','.character-rack','.cloud-panel','.master-recorder'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {selector,x:r.x,y:r.y,right:r.right,bottom:r.bottom};})}));
     assert(cabinet.top<=12,'The cabinet starts immediately below the browser edge');assert(cabinet.overflow<=cabinet.width);
     for(let i=0;i<cabinet.panels.length;i++)for(let j=i+1;j<cabinet.panels.length;j++){const a=cabinet.panels[i],b=cabinet.panels[j];assert(a.right<=b.x+.5||b.right<=a.x+.5||a.bottom<=b.y+.5||b.bottom<=a.y+.5,`Control plates do not overlap: ${a.selector} / ${b.selector}`);}
     await page.screenshot({path:`test-results/cabinet-${size.width}.png`,fullPage:true});
   }
   await page.setViewportSize({width:1440,height:900});
-  const originalTime=await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalFeedback=await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow');
-  await page.getByRole('button',{name:'Wander',exact:true}).click();assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');assert.equal(await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow'),originalFeedback);
+  const originalTime=await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalFeedback=await page.getByRole('slider',{name:'Feedback',exact:true}).getAttribute('aria-valuenow');
+  await page.getByRole('button',{name:'Wander',exact:true}).click();assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');assert.equal(await page.getByRole('slider',{name:'Feedback',exact:true}).getAttribute('aria-valuenow'),originalFeedback);
   await page.getByRole('button',{name:'Return',exact:true}).click();assert.equal(await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalTime);assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Warm space');
   pass('Expanded cabinet has no overlap at three desktop sizes; Wander is reversible');
 
@@ -115,7 +117,7 @@ try{
   pass('Invalid import reports a useful error without replacing audio');
   await page.getByRole('button',{name:'Dismiss message',exact:true}).click();
   for(const width of [390,320,768]){await page.setViewportSize({width,height:844});await page.waitForTimeout(80);const sizes=await page.evaluate(()=>({w:innerWidth,body:document.documentElement.scrollWidth}));assert(sizes.body<=sizes.w,`No horizontal overflow at ${width}: ${JSON.stringify(sizes)}`);await page.screenshot({path:`test-results/mobile-${width}.png`,fullPage:true});}
-  await page.setViewportSize({width:390,height:844});assert(await page.locator('.instrument').evaluate(el=>el.getBoundingClientRect().top+scrollY>=36),'Mobile leaves room above the cabinet');assert(await page.getByRole('button',{name:'Record master from quick controls',exact:true}).isVisible());await page.getByRole('slider',{name:'Intensity',exact:true}).focus();await page.keyboard.press('Home');assert.equal(await page.getByRole('slider',{name:'Intensity',exact:true}).getAttribute('aria-valuenow'),'0');
+  await page.setViewportSize({width:390,height:844});assert(await page.locator('.instrument').evaluate(el=>el.getBoundingClientRect().top+scrollY>=36),'Mobile leaves room above the cabinet');assert(await page.getByRole('button',{name:'Record master from quick controls',exact:true}).isVisible());await page.getByRole('slider',{name:'Feedback',exact:true}).focus();await page.keyboard.press('Home');assert.equal(await page.getByRole('slider',{name:'Feedback',exact:true}).getAttribute('aria-valuenow'),'0');
   pass('Responsive 320/390/768 layouts and keyboard knob control');
   await page.getByRole('button',{name:'Field guide',exact:true}).click();await page.getByText('A small field guide',{exact:true}).waitFor();await page.keyboard.press('Escape');assert.equal(await page.locator('dialog[open]').count(),0);
   await page.waitForFunction(()=>navigator.serviceWorker.controller!==null,undefined,{timeout:15000});await context.setOffline(true);await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();await page.getByRole('button',{name:'Play tape from quick controls',exact:true}).click();await page.waitForTimeout(500);assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));await page.getByRole('button',{name:'Pause tape from quick controls',exact:true}).click();
@@ -127,7 +129,7 @@ try{
   await legacy.goto(base);await legacy.getByText('Saved on this device',{exact:true}).waitFor();
   assert.equal(await legacy.getByLabel('Session name',{exact:true}).inputValue(),'Existing session');
   await legacy.getByRole('button',{name:'Select track 1: Existing sample',exact:true}).waitFor();
-  await legacy.getByRole('slider',{name:'Intensity',exact:true}).focus();await legacy.keyboard.press('ArrowUp');await legacy.getByText('Saved on this device',{exact:true}).waitFor();
+  await legacy.getByRole('slider',{name:'Feedback',exact:true}).focus();await legacy.keyboard.press('ArrowUp');await legacy.getByText('Saved on this device',{exact:true}).waitFor();
   await legacy.reload();await legacy.getByText('Saved on this device',{exact:true}).waitFor();await legacy.getByRole('button',{name:'Select track 1: Existing sample',exact:true}).waitFor();
   const migrationDownload=legacy.waitForEvent('download');await legacy.getByRole('button',{name:'Export latest take',exact:true}).click();await legacy.getByRole('button',{name:'Download file',exact:true}).click();const migrated=await migrationDownload;await migrated.saveAs('test-results/migrated.wav');assert.deepEqual(await readFile('test-results/migrated.wav'),wav());
   await legacyContext.close();pass('Existing version-one sessions migrate without losing sample audio or recorded WAV bytes');
