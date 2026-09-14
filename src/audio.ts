@@ -2,7 +2,7 @@ export type Clip = { name: string; channels: Float32Array[]; sampleRate: number 
 export type Track = { clip: Clip | null; volume: number; muted: boolean; solo: boolean; reversed: boolean; mode: 'tape'|'loop'|'once'; loopStart: number; loopEnd: number; pan: number; send: number };
 export const TRACK_DEFAULTS = {mode:'tape' as const,loopStart:0,loopEnd:0,pan:0,send:1};
 export type Parameters = { time: number; feedback: number; mix: number; age: number; wow: number; flutter: number; drive: number; tone: number; reverb: number; volume: number; hiss: number; crinkle: number; lowCut: number; spread: number; space: number; decay: number };
-export type Take = { id: string; name: string; blob: Blob; duration: number; pcm?: {sampleRate:number;frames:number;chunkFrames:number}; interrupted?:boolean };
+export type Take = { id: string; name: string; blob: Blob; duration: number; pcm?: {sampleRate:number;frames:number;chunkFrames:number}; interrupted?:boolean; trimStart?:number; trimEnd?:number };
 export const MASTER_LIMIT = 30 * 60;
 export type HeadTiming = {time:number;sync:boolean;division:string};
 export type CloudParameters = {dissolve:number;grainSize:number;memory:number;scatter:number;wander:number;return:number};
@@ -74,10 +74,19 @@ export class TapeEngine {
   cloudVisual:CloudVisual = {peaks:[],grains:[],filled:0,hold:false,motion:'idle',motionDuration:0,values:Object.values(CLOUD_DEFAULTS)};
   holding=false; inputCut=false; swelling=false; braking=false; throwing=-1; private motorSpeed=1; private tapeOrigin=0; private taps:number[]=[];
   playing=false; recording=false; masterSaving=false; micRecording=false; micArming=false; monitoring=false; overdub=false;
+  micTrack:number|null=null; micLive=false; micDeviceId=''; micChannel:'mono'|'left'|'right'|'stereo'='mono'; micGainDb=0; micCountIn=false; micDeviceLabel='Default microphone'; micProblem='';
+  micAnalyser:AnalyserNode|null=null; micRawAnalyser:AnalyserNode|null=null;
+  trackAnalysers:AnalyserNode[]=[]; inputAnalyser:AnalyserNode|null=null;
+  private micTrim:GainNode|null=null; private micMonitor:GainNode|null=null; private micSplitter:ChannelSplitterNode|null=null; private micMerger:ChannelMergerNode|null=null;
+  private countClicks:OscillatorNode[]=[];
+  tailSaving=false; private tailTimer:ReturnType<typeof setTimeout>|null=null;
+  get micRecordingTarget(){return this.micTarget;}
+  get micActive(){return !!this.micStream;}
   position=0; startedAt=0; recordingStarted=0; micStarted=0;
   takes: Take[]=[]; selected=0; onChange:()=>void=()=>{}; onNotice:(s:string)=>void=()=>{};
   private sources: {node:AudioBufferSourceNode;fade:GainNode;index:number}[]=[]; private gains: GainNode[]=[]; private sends: GainNode[]=[]; private pans: StereoPannerNode[]=[];
   private input!: GainNode; private echoInput!: GainNode; private spaceNode!: AudioWorkletNode; private spaceGain!: GainNode; private spring!:ConvolverNode; private tape!: AudioWorkletNode; private reverbGain!: GainNode; private master!: GainNode;
+  private auditionWet:GainNode|null=null; private auditionDry:GainNode|null=null;
   analyser!: AnalyserNode; private capture!: AudioWorkletNode;
   private micStream: MediaStream|null=null; private micSource: MediaStreamAudioSourceNode|null=null; private micCapture:AudioWorkletNode|null=null; private micSilent:GainNode|null=null;
   private recorder!:Worker; private recorderFailed=false;
@@ -110,8 +119,8 @@ export class TapeEngine {
     if(!this.ctx){
       const Ctx = window.AudioContext || (window as unknown as {webkitAudioContext:typeof AudioContext}).webkitAudioContext;
       if(!Ctx)throw new Error('This browser does not support audio. Try Safari, Chrome, or Firefox.');
-      // A modest output buffer gives file decoding and visual updates headroom.
-      this.ctx=new Ctx({latencyHint:.08,sampleRate:48000});
+      // Prioritize live monitoring; recording still has its independent eight-second buffer.
+      this.ctx=new Ctx({latencyHint:'interactive',sampleRate:48000});
       this.initPromise=this.setup().catch(error=>{void this.ctx?.close();this.ctx=null;this.initPromise=null;throw error;});
     }
     await this.ctx.resume(); await this.initPromise;
@@ -128,9 +137,10 @@ export class TapeEngine {
     this.spaceNode=new AudioWorkletNode(ctx,'magnetic-space',{outputChannelCount:[2]});this.spaceGain=ctx.createGain();this.tape.connect(this.spaceNode);this.spaceNode.connect(this.spaceGain);this.spaceGain.connect(this.master);
     const limiter=ctx.createDynamicsCompressor();limiter.threshold.value=-3;limiter.knee.value=5;limiter.ratio.value=16;limiter.attack.value=.003;limiter.release.value=.15;
     this.capture=new AudioWorkletNode(ctx,'magnetic-capture',{outputChannelCount:[2],processorOptions:{maxSeconds:MASTER_LIMIT}});
-    this.analyser=ctx.createAnalyser();this.analyser.fftSize=256;
-    this.master.connect(limiter);limiter.connect(this.capture);this.capture.connect(this.analyser);this.analyser.connect(ctx.destination);
-    this.gains=this.tracks.map(()=>{const g=ctx.createGain(),pan=ctx.createStereoPanner(),send=ctx.createGain();g.connect(pan);pan.connect(this.input);pan.connect(send);send.connect(this.echoInput);this.pans.push(pan);this.sends.push(send);return g;});
+    this.analyser=ctx.createAnalyser();this.analyser.fftSize=8192;this.analyser.smoothingTimeConstant=.65;
+    this.master.connect(limiter);limiter.connect(this.capture);this.capture.connect(this.analyser);this.auditionWet=ctx.createGain();this.auditionDry=ctx.createGain();this.auditionDry.gain.value=0;this.analyser.connect(this.auditionWet);this.auditionWet.connect(ctx.destination);this.input.connect(this.auditionDry);this.auditionDry.connect(ctx.destination);
+    this.inputAnalyser=ctx.createAnalyser();this.inputAnalyser.fftSize=8192;this.input.connect(this.inputAnalyser);
+    this.gains=this.tracks.map(()=>{const g=ctx.createGain(),pan=ctx.createStereoPanner(),send=ctx.createGain();g.connect(pan);pan.connect(this.input);pan.connect(send);send.connect(this.echoInput);const analyser=ctx.createAnalyser();analyser.fftSize=8192;pan.connect(analyser);this.trackAnalysers.push(analyser);this.pans.push(pan);this.sends.push(send);return g;});
     this.tape.port.onmessage=({data})=>{if(data.type==='cloud')this.cloudVisual=data;};
     // Eight seconds of shared PCM absorb worker scheduling stalls. The audio
     // callback only copies samples; WAV conversion happens on demand elsewhere.
@@ -146,7 +156,7 @@ export class TapeEngine {
         if(data.type==='error')this.recorderError(data.message);
         if(data.type==='take'){
           if(data.frames){this.takes.unshift({id:crypto.randomUUID(),name:`Take ${String(Math.max(0,...this.takes.map(t=>Number(t.name.replace('Take ',''))||0))+1).padStart(2,'0')}`,blob:data.blob,duration:data.duration,pcm:data.pcm,interrupted:data.interrupted});this.onNotice(data.interrupted?'Capture buffer filled. The complete captured portion was saved; recording stopped.':data.limited?'30-minute limit reached. Master take saved.':'Master take saved. WAV is prepared when you export.');}
-          this.recording=false;this.masterSaving=false;this.stopResolve?.();this.stopResolve=null;this.onChange();
+          this.recording=false;this.masterSaving=false;this.tailSaving=false;if(this.tailTimer)clearTimeout(this.tailTimer);this.tailTimer=null;this.applyMicSettings();this.stopResolve?.();this.stopResolve=null;this.onChange();
         }
       };
       this.recorder.postMessage({source:channel.port2,sampleRate:ctx.sampleRate,shared},[channel.port2]);
@@ -294,44 +304,163 @@ export class TapeEngine {
     // Share concurrent requests, then release the extra WAV memory.
     try{return await job;}finally{this.wavJobs.delete(take.blob);}
   }
-  async startMaster(){await this.init();if(this.recorderFailed)throw new Error('Reload the studio before recording again.');if(this.recording||this.masterSaving)return;if(this.captureState)this.captureState.fill(0);this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
-  async stopMaster(){if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterSaving=true;this.onChange();this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{if(!this.recording){resolve();return;}this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;this.masterSaving=false;}}
+  async startMaster(){await this.init();this.auditionOriginal(false);this.applyMicSettings();if(this.recorderFailed)throw new Error('Reload the studio before recording again.');if(this.recording||this.masterSaving)return;if(this.captureState)this.captureState.fill(0);this.recording=true;this.recordingStarted=this.ctx!.currentTime;this.capture.port.postMessage('start');this.onChange();}
+  async stopMaster(){if(this.tailTimer)clearTimeout(this.tailTimer);this.tailTimer=null;this.tailSaving=false;if(this.masterStopPromise)return this.masterStopPromise;if(!this.recording)return;this.masterSaving=true;this.onChange();this.masterStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{if(!this.recording){resolve();return;}this.stopResolve=resolve;this.capture.port.postMessage('stop');}));try{await this.masterStopPromise;}finally{this.masterStopPromise=null;this.masterSaving=false;}}
+  auditionOriginal(active:boolean){
+    if(!this.ctx||!this.auditionWet||!this.auditionDry||!this.inputAnalyser)return;
+    if(this.recording)active=false;
+    let gain=1;
+    if(active){const a=new Float32Array(8192),b=new Float32Array(8192);this.inputAnalyser.getFloatTimeDomainData(a);this.analyser.getFloatTimeDomainData(b);const rms=(v:Float32Array)=>Math.sqrt(v.reduce((n,x)=>n+x*x,0)/v.length);gain=Math.max(.25,Math.min(4,rms(b)/Math.max(.0001,rms(a))));}
+    this.auditionWet.gain.setTargetAtTime(active?0:1,this.ctx.currentTime,.025);this.auditionDry.gain.setTargetAtTime(active?gain:0,this.ctx.currentTime,.025);
+  }
+  async finishWithTail(){
+    if(!this.recording||this.tailSaving)return;
+    this.pause();this.micMonitor?.gain.setTargetAtTime(0,this.ctx!.currentTime,.01);
+    this.tailSaving=true;this.onNotice('Tape paused. Capturing the decay; Stop & save ends it immediately.');this.onChange();
+    const began=this.ctx!.currentTime,samples=new Float32Array(2048);let quietSince:number|null=null;
+    const check=()=>{
+      if(!this.recording){this.tailSaving=false;return;}
+      const now=this.ctx!.currentTime;this.analyser.getFloatTimeDomainData(samples);
+      const rms=Math.sqrt(samples.reduce((n,v)=>n+v*v,0)/samples.length);
+      if(rms<.001)quietSince??=now;else quietSince=null;
+      if(now-began>=30||(now-began>=2&&quietSince!==null&&now-quietSince>1.5))void this.stopMaster();
+      else this.tailTimer=setTimeout(check,150);
+    };check();
+  }
+  private async openMic(index:number){
+    await this.init();
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error('Microphone recording needs HTTPS or localhost.');
+    if(this.micStream&&this.micTrack===index)return;
+    const stream=await navigator.mediaDevices.getUserMedia({audio:{deviceId:this.micDeviceId?{exact:this.micDeviceId}:undefined,echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:{ideal:2}}});
+    this.releaseMic();
+    try{
+      this.micStream=stream;this.micTrack=index;this.micProblem='';
+      const track=stream.getAudioTracks()[0];this.micDeviceLabel=track.label||'Microphone';
+      this.micSource=this.ctx!.createMediaStreamSource(stream);
+      this.micSplitter=this.ctx!.createChannelSplitter(2);this.micMerger=this.ctx!.createChannelMerger(2);
+      this.micTrim=this.ctx!.createGain();this.micMonitor=this.ctx!.createGain();
+      this.micAnalyser=this.ctx!.createAnalyser();this.micAnalyser.fftSize=8192;
+      this.micRawAnalyser=this.ctx!.createAnalyser();this.micRawAnalyser.fftSize=2048;
+      this.micSource.connect(this.micSplitter);this.micMerger.connect(this.micRawAnalyser);this.micMerger.connect(this.micTrim);
+      this.micTrim.connect(this.micAnalyser);this.micTrim.connect(this.micMonitor);this.micMonitor.connect(this.gains[index]);
+      this.applyMicSettings();
+      track.addEventListener('ended',()=>{
+        if(this.micStream!==stream)return;
+        this.micProblem=`${this.micDeviceLabel} disconnected. Choose an input to reconnect.`;this.micLive=false;
+        if(this.micRecording)void this.stopMic().finally(()=>this.releaseMic());else this.releaseMic();
+        this.onNotice(this.micProblem);this.onChange();
+      });
+    }catch(error){this.releaseMic();throw error;}
+  }
+  private applyMicSettings(){
+    if(!this.ctx||!this.micSplitter||!this.micMerger)return;
+    this.micSplitter.disconnect();
+    const stereo=(this.micStream?.getAudioTracks()[0].getSettings().channelCount||1)>1;
+    if(this.micChannel==='mono'&&stereo){
+      // Sum both inputs with half gain rather than discarding one side of a stereo mic.
+      this.micMerger.disconnect();this.micMerger.connect(this.micRawAnalyser!);this.micMerger.connect(this.micTrim!);
+      this.micSplitter.connect(this.micMerger,0,0);this.micSplitter.connect(this.micMerger,1,1);
+      this.micTrim!.channelCount=1;this.micTrim!.channelCountMode='explicit';
+    }else{
+      const left=this.micChannel==='right'&&stereo?1:0,right=this.micChannel==='stereo'&&stereo?1:left;
+      this.micSplitter.connect(this.micMerger,left,0);this.micSplitter.connect(this.micMerger,right,1);
+      this.micTrim!.channelCount=2;this.micTrim!.channelCountMode='explicit';
+    }
+    this.micTrim!.gain.setTargetAtTime(10**(this.micGainDb/20),this.ctx.currentTime,.015);
+    this.micMonitor!.gain.setTargetAtTime(this.monitoring&&!this.tailSaving?1:0,this.ctx.currentTime,.015);
+  }
+  async activateMic(index:number){
+    if(this.micArming||this.micRecording)return;
+    this.micArming=true;this.onChange();
+    try{await this.openMic(index);this.micLive=true;}
+    catch(error){this.micError(error);}
+    finally{this.micArming=false;this.onChange();}
+  }
+  async changeMicDevice(id:string){
+    if(this.micRecording||this.micArming)return;
+    const previous=this.micDeviceId,index=this.micTrack;this.micDeviceId=id;
+    if(index!==null){
+      // Keep the current working input until the replacement has been granted.
+      this.micTrack=null;this.micArming=true;this.onChange();
+      try{await this.openMic(index);this.micLive=true;}
+      catch(error){this.micDeviceId=previous;this.micTrack=index;this.micError(error);}
+      finally{this.micArming=false;}
+    }
+    this.onChange();
+  }
+  setMicGain(db:number){this.micGainDb=Math.max(-24,Math.min(24,Number.isFinite(db)?db:0));this.applyMicSettings();this.onChange();}
+  setMicChannel(channel:typeof this.micChannel){if(this.micRecording)return;this.micChannel=channel;this.applyMicSettings();this.onChange();}
+  async deactivateMic(){if(this.micRecording)await this.stopMic();this.micLive=false;this.monitoring=false;this.releaseMic();this.onChange();}
+  private micError(error:unknown):never{
+    if(error instanceof DOMException){
+      if(error.name==='NotAllowedError')throw new Error('Microphone permission was denied. Allow microphone access in your browser’s site settings.');
+      if(error.name==='NotFoundError'||error.name==='OverconstrainedError')throw new Error('The selected microphone is unavailable. Choose another input or System default.');
+      if(error.name==='NotReadableError')throw new Error('The microphone is busy or unavailable. Check the device connection.');
+    }throw error;
+  }
   async startMic(index:number){
     if(this.micRecording||this.micArming)return;this.micArming=true;this.onChange();
     try{
-      await this.init();if(!navigator.mediaDevices?.getUserMedia)throw new Error('Microphone recording needs HTTPS or localhost.');
-      this.micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}});
-      this.micTarget=index;this.micOffset=this.currentPosition;this.micRate=this.speed;this.micOverdub=this.overdub;
-      this.micSource=this.ctx!.createMediaStreamSource(this.micStream);this.micCapture=new AudioWorkletNode(this.ctx!,'magnetic-capture',{outputChannelCount:[2]});
-      this.micSilent=this.ctx!.createGain();this.micSilent.gain.value=0;this.micSource.connect(this.micCapture);this.micCapture.connect(this.micSilent);this.micSilent.connect(this.ctx!.destination);
-      if(this.monitoring){this.micSource.connect(this.input);this.micSource.connect(this.echoInput);}
+      await this.openMic(index);
+      this.micTarget=index;this.micRate=this.speed;this.micOverdub=this.overdub;
+      const delay=this.micCountIn?4*60/this.bpm:0;
+      this.micStarted=this.ctx!.currentTime+delay;
+      const position=this.trackPosition(index)+(this.playing?delay*this.speed:0);
+      this.micOffset=this.tracks[index].mode==='loop'?this.loopBounds(index).start+(position-this.loopBounds(index).start)%(this.loopBounds(index).end-this.loopBounds(index).start):this.loop?position%this.duration:position;
+      this.micCapture=new AudioWorkletNode(this.ctx!,'magnetic-capture',{outputChannelCount:[2]});
+      this.micSilent=this.ctx!.createGain();this.micSilent.gain.value=0;this.micTrim!.connect(this.micCapture);this.micCapture.connect(this.micSilent);this.micSilent.connect(this.ctx!.destination);
       this.micChunks=[[],[]];this.micCapture.port.onmessage=({data})=>{
         if(data.type==='chunk'){this.micChunks[0].push(data.left);this.micChunks[1].push(data.right);}
         if(data.type==='done'){
-          const captured=this.micChunks.map(joinChunks);this.micChunks=[[],[]];
-          if(captured[0].length){
-            const sr=this.ctx!.sampleRate, old=this.tracks[this.micTarget].clip;
-            const offset=Math.floor(this.micOffset*sr), recordedFrames=Math.ceil(captured[0].length*this.micRate);
-            const oldLength=this.micOverdub&&old?Math.ceil(old.channels[0].length/old.sampleRate*sr):0;
-            const len=Math.max(offset+recordedFrames,oldLength);
-            const channels=[new Float32Array(len),new Float32Array(len)];
-            for(let c=0;c<2;c++){
-              if(this.micOverdub&&old){const a=old.channels[c]||old.channels[0];for(let i=0;i<oldLength;i++){let r=i/sr*old.sampleRate;if(this.tracks[this.micTarget].reversed)r=a.length-1-r;const lo=Math.max(0,Math.floor(r));channels[c][i]=a[lo]||0;}}
-              for(let i=0;i<recordedFrames;i++){const r=i/this.micRate,lo=Math.floor(r),f=r-lo;channels[c][offset+i]+=(captured[c][lo]||0)*(1-f)+(captured[c][lo+1]||0)*f;}
+          try{
+            const captured=this.micChunks.map(joinChunks);this.micChunks=[[],[]];
+            if(captured[0].length){
+              const sr=this.ctx!.sampleRate,old=this.tracks[this.micTarget].clip;
+              const offset=Math.floor(this.micOffset*sr),recordedFrames=Math.ceil(captured[0].length*this.micRate);
+              const oldLength=this.micOverdub&&old?Math.ceil(old.channels[0].length/old.sampleRate*sr):0;
+              const len=Math.max(offset+recordedFrames,oldLength),channels=[new Float32Array(len),new Float32Array(len)];
+              for(let c=0;c<2;c++){
+                if(this.micOverdub&&old){const a=old.channels[c]||old.channels[0];for(let i=0;i<oldLength;i++){let r=i/sr*old.sampleRate;if(this.tracks[this.micTarget].reversed)r=a.length-1-r;const lo=Math.max(0,Math.floor(r));channels[c][i]=a[lo]||0;}}
+                for(let i=0;i<recordedFrames;i++){const r=i/this.micRate,lo=Math.floor(r),f=r-lo;channels[c][offset+i]+=(captured[c][lo]||0)*(1-f)+(captured[c][lo+1]||0)*f;}
+              }
+              this.setClip(this.micTarget,{name:this.micOverdub&&old?`${old.name} + overdub`:'Microphone take',sampleRate:sr,channels});
+              this.onNotice(data.limited?`10-minute limit reached. Recording saved on track ${this.micTarget+1}.`:`Recording saved on track ${this.micTarget+1}.`);
             }
-            this.setClip(this.micTarget,{name:this.micOverdub&&old?`${old.name} + overdub`:'Microphone take',sampleRate:sr,channels});this.onNotice(`Recording saved on track ${this.micTarget+1}.`);
+          }catch{this.onNotice('Not enough memory to place this microphone take. Shorter recordings use less memory.');}
+          finally{
+            if(this.micCapture)this.micTrim?.disconnect(this.micCapture);this.micCapture?.disconnect();this.micSilent?.disconnect();
+            this.micCapture=null;this.micSilent=null;this.micRecording=false;
+            if(!this.micLive&&!this.monitoring)this.releaseMic();
+            this.micResolve?.();this.micResolve=null;this.onChange();
           }
-          this.releaseMic();this.micResolve?.();this.micResolve=null;
         }
       };
-      this.micRecording=true;this.micStarted=this.ctx!.currentTime;this.micCapture.port.postMessage('start');
-      this.onNotice(this.micOverdub?'Recording an overdub…':'Recording microphone…');
-    }catch(error){this.releaseMic();if(error instanceof DOMException&&error.name==='NotAllowedError')throw new Error('Microphone permission was denied. Allow it in your browser’s site settings, then try again.');throw error;}
+      this.micRecording=true;this.micCapture.port.postMessage(delay?{startAt:this.micStarted}:'start');
+      if(delay)for(let i=0;i<4;i++){
+        const oscillator=this.ctx!.createOscillator(),gain=this.ctx!.createGain(),at=this.ctx!.currentTime+i*60/this.bpm;
+        oscillator.frequency.value=i===0?1000:750;gain.gain.setValueAtTime(.045,at);gain.gain.exponentialRampToValueAtTime(.0001,at+.045);
+        oscillator.connect(gain);gain.connect(this.ctx!.destination);oscillator.start(at);oscillator.stop(at+.05);
+        oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();};this.countClicks.push(oscillator);
+      }
+      this.onNotice(delay?'Four-beat count-in…':this.micOverdub?'Recording an overdub…':'Recording microphone…');
+    }catch(error){if(!this.micLive)this.releaseMic();this.micError(error);}
     finally{this.micArming=false;this.onChange();}
   }
-  async stopMic(){if(this.micStopPromise)return this.micStopPromise;if(!this.micRecording)return;this.micStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{this.micResolve=resolve;this.micCapture!.port.postMessage('stop');}));try{await this.micStopPromise;}finally{this.micStopPromise=null;}}
-  private releaseMic(){this.micStream?.getTracks().forEach(t=>t.stop());this.micSource?.disconnect();this.micCapture?.disconnect();this.micSilent?.disconnect();this.micStream=null;this.micSource=null;this.micCapture=null;this.micSilent=null;this.micRecording=false;this.onChange();}
-  setMonitoring(value:boolean){this.monitoring=value;if(this.micSource){if(value){this.micSource.connect(this.input);this.micSource.connect(this.echoInput);}else{this.micSource.disconnect(this.input);this.micSource.disconnect(this.echoInput);}}this.onChange();}
+  async stopMic(){
+    for(const click of this.countClicks)try{click.stop();}catch{}this.countClicks=[];
+    if(this.micStopPromise)return this.micStopPromise;if(!this.micRecording)return;
+    this.micStopPromise=this.ctx!.resume().then(()=>new Promise<void>(resolve=>{this.micResolve=resolve;this.micCapture!.port.postMessage('stop');}));
+    try{await this.micStopPromise;}finally{this.micStopPromise=null;}
+  }
+  private releaseMic(){
+    this.micStream?.getTracks().forEach(t=>t.stop());this.micSource?.disconnect();this.micCapture?.disconnect();this.micSilent?.disconnect();
+    this.micSplitter?.disconnect();this.micMerger?.disconnect();this.micTrim?.disconnect();this.micMonitor?.disconnect();this.micAnalyser?.disconnect();this.micRawAnalyser?.disconnect();
+    this.micStream=null;this.micSource=null;this.micCapture=null;this.micSilent=null;this.micSplitter=null;this.micMerger=null;this.micTrim=null;this.micMonitor=null;this.micAnalyser=null;this.micRawAnalyser=null;this.micTrack=null;this.micRecording=false;
+  }
+  async setMonitoring(value:boolean,index=this.selected){
+    if(value&&!this.micStream)await this.activateMic(index);
+    this.monitoring=value;this.applyMicSettings();this.onChange();
+  }
   panic(){this.holding=false;this.cloudHolding=false;this.inputCut=false;this.releasePerformance();this.setParam('feedback',.25);this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}this.onNotice('Echo, cloud and reverb cleared. Feedback reset.');}
   async bounce(index:number){const take=this.takes[0];if(!take)return;await this.importFile(new File([await this.takeWav(take)],`${take.name} bounce.wav`,{type:'audio/wav'}),index);}
 }

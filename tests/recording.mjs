@@ -20,7 +20,7 @@ try{for(const fallback of [false,true]){
         if(isRecorder){const script=`importScripts(${JSON.stringify(new URL(url,location.href).href)});const handler=self.onmessage;self.onmessage=e=>{if(e.data.stall){const until=performance.now()+e.data.stall;while(performance.now()<until){Math.sqrt(Math.random());}}else handler(e);};`;url=URL.createObjectURL(new Blob([script],{type:'text/javascript'}));}
         super(url,options);
         if(isRecorder)window.__recorder=this;
-        if(String(url).includes('wav-worker.js'))window.__wavJobs++;
+        if((String(url).includes('wav-worker.js')||String(url).includes('export-worker.js')))window.__wavJobs++;
       }
     };
   },{fallback});
@@ -51,10 +51,10 @@ try{for(const fallback of [false,true]){
   assert(rect&&rect.y>=0&&rect.y+rect.height<=844,'Master stop is reachable while scrolled on mobile');
   await page.screenshot({path:`test-results/recording-mobile-${mode}.png`});
   await quick.click();
-  await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Export latest take',exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.__wavJobs),0,'Stopping stores raw PCM without conversion');
   assert.equal(await page.locator('.capture-frame.active').count(),0);
-  const pending=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).click();
+  const pending=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take',exact:true}).click();await page.getByRole('button',{name:'Download file',exact:true}).click();
   const path=`test-results/continuous-recording-${mode}.wav`;await (await pending).saveAs(path);
   assert.equal(await page.evaluate(()=>window.__wavJobs),1,'Export launches its own encoder');
   await page.getByRole('button',{name:'Pause playback',exact:true}).click();
@@ -64,7 +64,7 @@ try{for(const fallback of [false,true]){
   for(let start=0;start+windowSize<frames;start+=windowSize){let sum=0;for(let i=start;i<start+windowSize;i++){const sample=bytes.readInt16LE(44+i*4)/32768;sum+=sample*sample;maxStep=Math.max(maxStep,Math.abs(sample-previous));previous=sample;}minRms=Math.min(minRms,Math.sqrt(sum/windowSize));}
   assert(frames/sr>2);assert(minRms>.09,`No silent or dropped 20 ms windows: minimum RMS ${minRms}`);assert(maxStep<.025,`No discontinuities: maximum step ${maxStep}`);assert.deepEqual(errors,[]);
   await page.getByText('Saved on this device',{exact:true}).waitFor();await page.reload();await page.getByText('Saved on this device',{exact:true}).waitFor();
-  const again=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).click();await(await again).saveAs(`test-results/restored-${mode}.wav`);
+  const again=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take',exact:true}).click();await page.getByRole('button',{name:'Download file',exact:true}).click();await(await again).saveAs(`test-results/restored-${mode}.wav`);
   assert.deepEqual(await readFile(`test-results/restored-${mode}.wav`),bytes,'Reloaded raw PCM exports to identical WAV bytes');
   const result={mode,duration:frames/sr,sampleRate:sr,minimum20msRms:minRms,maximumSampleStep:maxStep};results.push(result);
   console.log(`PASS ${mode}: 179-second import, 2-second recorder stall, 1.5-second UI stall, mobile stop, deferred export and identical reload: ${JSON.stringify(result)}`);

@@ -1,5 +1,5 @@
 import type {Clip, Parameters, Take, Track, HeadTiming, CloudParameters} from './audio';
-export type Session = {tracks:Track[];params:Parameters;heads:boolean[];takes:Take[];name:string;speed:number;loop:boolean;enabled:boolean;selected:number;preset:string;bpm?:number;sync?:boolean;division?:string;headTiming?:HeadTiming[];cloud?:CloudParameters};
+export type Session = {tracks:Track[];params:Parameters;heads:boolean[];takes:Take[];name:string;speed:number;loop:boolean;enabled:boolean;selected:number;preset:string;bpm?:number;sync?:boolean;division?:string;headTiming?:HeadTiming[];cloud?:CloudParameters;microphone?:{deviceId:string;channel:'mono'|'left'|'right'|'stereo';gainDb:number;countIn:boolean}};
 type StoredSession = Omit<Session,'tracks'|'takes'> & {schema:2;tracks:(Omit<Track,'clip'>&{clipId:string|null})[];takeIds:string[]};
 let dbPromise:Promise<IDBDatabase>|null=null;
 const clipIds=new WeakMap<Clip,string>();

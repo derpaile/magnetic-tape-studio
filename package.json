@@ -8,9 +8,25 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "deploy": "npm run build && wrangler deploy",
-    "test:e2e": "node tests/audio.mjs && node tests/memory.mjs && node tests/transport.mjs && node tests/browser.mjs && node tests/recording.mjs",
-    "test:release": "node tests/release.mjs"
+    "test:e2e": "node tests/audio.mjs && node tests/memory.mjs && node tests/transport.mjs && node tests/export.mjs && node tests/browser.mjs && node tests/recording.mjs && node tests/live-export.mjs",
+    "test:release": "node tests/release.mjs",
+    "prebuild": "node scripts/prepare-codecs.mjs",
+    "predev": "node scripts/prepare-codecs.mjs"
   },
-  "dependencies": { "react": "^19.1.0", "react-dom": "^19.1.0", "lucide-react": "^0.468.0" },
-  "devDependencies": { "@types/react": "^19.1.0", "@types/react-dom": "^19.1.0", "typescript": "~5.8.3", "vite": "^6.3.5", "@vitejs/plugin-react": "^4.4.1", "playwright": "^1.55.0", "wrangler": "^4.30.0" }
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "playwright": "^1.55.0",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "wrangler": "^4.30.0"
+  }
 }

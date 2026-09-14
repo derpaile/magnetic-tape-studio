@@ -188,7 +188,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.port.onmessage=({data})=>{
       if(data.shared){this.state=new Int32Array(data.shared.state);this.ring=new Float32Array(data.shared.audio);this.capacity=this.ring.length/2;this.pool=[];}
       if(data.sink){this.sink=data.sink;this.sink.onmessage=({data:m})=>{if(m.type==='recycle'&&this.pool.length<64)this.pool.push([m.left,m.right]);};}
-      if(data==='start'&&!this.active){this.count=0;this.total=0;this.interrupted=false;if(this.state){Atomics.store(this.state,0,0);Atomics.store(this.state,1,0);}else if(!this.chunk)this.chunk=this.pool.pop()||[new Float32Array(8192),new Float32Array(8192)];this.active=true;this.sink.postMessage({type:'started'});}
+      if((data==='start'||typeof data.startAt==='number')&&!this.active){this.startAt=typeof data.startAt==='number'?data.startAt:0;this.count=0;this.total=0;this.interrupted=false;if(this.state){Atomics.store(this.state,0,0);Atomics.store(this.state,1,0);}else if(!this.chunk)this.chunk=this.pool.pop()||[new Float32Array(8192),new Float32Array(8192)];this.active=true;this.sink.postMessage({type:'started'});}
       if(data==='stop')this.finish();
     };
   }
@@ -205,14 +205,15 @@ class CaptureProcessor extends AudioWorkletProcessor {
     const input=inputs[0],output=outputs[0],left=input[0],right=input[1]||left;
     for(let c=0;c<output.length;c++)if(input[c]||left)output[c].set(input[c]||left);
     if(!this.active)return true;
-    const count=Math.min(output[0].length,this.limit-this.total);
+    const first=this.startAt?Math.max(0,Math.min(output[0].length,Math.ceil((this.startAt-currentTime)*sampleRate))):0;
+    const count=Math.min(output[0].length-first,this.limit-this.total);
     if(this.state){
       const read=Atomics.load(this.state,1);
       if(this.total-read+count>this.capacity){this.interrupted=true;this.finish();return true;}
-      for(let i=0;i<count;i++){const at=(this.total+i)%this.capacity;this.ring[at]=left?.[i]||0;this.ring[this.capacity+at]=right?.[i]||0;}
+      for(let i=0;i<count;i++){const at=(this.total+i)%this.capacity;this.ring[at]=left?.[i+first]||0;this.ring[this.capacity+at]=right?.[i+first]||0;}
       this.total+=count;Atomics.store(this.state,0,this.total);
     }else for(let i=0;i<count&&this.active;i++){
-      this.chunk[0][this.count]=left?.[i]||0;this.chunk[1][this.count]=right?.[i]||0;
+      this.chunk[0][this.count]=left?.[i+first]||0;this.chunk[1][this.count]=right?.[i+first]||0;
       this.count++;this.total++;if(this.count===8192)this.flush();
     }
     if(this.total>=this.limit)this.finish();

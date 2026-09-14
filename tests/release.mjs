@@ -16,7 +16,7 @@ try{
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   assert(!(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent'));
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(350);await page.getByRole('button',{name:'Stop & save take',exact:true}).click();
-  await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).waitFor();const exported=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take as WAV',exact:true}).click();await exported;
+  await page.getByRole('button',{name:'Export latest take',exact:true}).waitFor();const exported=page.waitForEvent('download');await page.getByRole('button',{name:'Export latest take',exact:true}).click();await page.getByRole('button',{name:'Download file',exact:true}).click();await exported;
   await page.getByRole('button',{name:'Pause playback',exact:true}).click();
   console.log('PASS Hosted app uses shared memory, reloads, plays, records and exports offline, without redirected cache responses');
 }finally{await browser.close();}
