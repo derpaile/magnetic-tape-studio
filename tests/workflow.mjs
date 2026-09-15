@@ -8,7 +8,8 @@ const button=name=>page.getByRole('button',{name,exact:true});
 const saved=()=>page.getByText('Saved on this device',{exact:true}).waitFor();
 try{
  await page.goto(process.env.TEST_URL||'http://localhost:4173');await saved();
- assert(!await page.getByRole('slider',{name:'Dissolve',exact:true}).isVisible());
+ assert(await page.getByRole('slider',{name:'Dissolve',exact:true}).isVisible());
+ assert.equal(await page.getByRole('button',{name:'Show all sound tools',exact:true}).count(),0);
  await button('Play starter mix').click();await button('Pause playback').waitFor();
  assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'First light');
  assert.equal(await page.getByRole('button',{name:/Select track [1-4]: (Soft keys|Dusty drums|Sub pulse|Glass bells)/}).count(),4);
@@ -23,5 +24,5 @@ try{
  for(const width of [1440,768,390,320]){
   await page.setViewportSize({width,height:900});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`No horizontal overflow at ${width}`);await page.screenshot({path:`test-results/workflow-${width}.png`,fullPage:true});
  }
- assert.deepEqual(errors,[]);console.log('PASS Starter playback, contextual loops, keyboard seek, record from start, take deletion undo, backup review/restore/new tape, saved restoration, malformed-file recovery and responsive focused layout');
+ assert.deepEqual(errors,[]);console.log('PASS Starter playback, always-visible sound tools, contextual loops, keyboard seek, record from start, take deletion undo, backup review/restore/new tape, saved restoration and responsive layout');
 }finally{await browser.close();}

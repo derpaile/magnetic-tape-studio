@@ -121,7 +121,9 @@ export class TapeEngine {
       const Ctx = window.AudioContext || (window as unknown as {webkitAudioContext:typeof AudioContext}).webkitAudioContext;
       if(!Ctx)throw new Error('This browser does not support audio. Try Safari, Chrome, or Firefox.');
       // Prioritize live monitoring; recording still has its independent eight-second buffer.
-      this.ctx=new Ctx({latencyHint:'interactive',sampleRate:48000});
+      // Native device rates remain stable across output-route changes, notably
+      // on mobile Safari where a forced rate can leave a live context silent.
+      this.ctx=new Ctx({latencyHint:'interactive'});
       this.initPromise=this.setup().catch(error=>{void this.ctx?.close();this.ctx=null;this.initPromise=null;throw error;});
     }
     await this.ctx.resume(); await this.initPromise;
@@ -139,7 +141,10 @@ export class TapeEngine {
     const limiter=ctx.createDynamicsCompressor();limiter.threshold.value=-3;limiter.knee.value=5;limiter.ratio.value=16;limiter.attack.value=.003;limiter.release.value=.15;
     this.capture=new AudioWorkletNode(ctx,'magnetic-capture',{outputChannelCount:[2],processorOptions:{maxSeconds:MASTER_LIMIT}});
     this.analyser=ctx.createAnalyser();this.analyser.fftSize=8192;this.analyser.smoothingTimeConstant=.65;
-    this.master.connect(limiter);limiter.connect(this.capture);this.capture.connect(this.analyser);this.auditionWet=ctx.createGain();this.auditionDry=ctx.createGain();this.auditionDry.gain.value=0;this.analyser.connect(this.auditionWet);this.auditionWet.connect(ctx.destination);this.input.connect(this.auditionDry);this.auditionDry.connect(ctx.destination);
+    // Playback stays independent from capture: a recorder interruption must
+    // never mute the studio output. The zero-gain branch keeps capture alive.
+    const captureSink=ctx.createGain();captureSink.gain.value=0;
+    this.master.connect(limiter);limiter.connect(this.analyser);limiter.connect(this.capture);this.capture.connect(captureSink);captureSink.connect(ctx.destination);this.auditionWet=ctx.createGain();this.auditionDry=ctx.createGain();this.auditionDry.gain.value=0;this.analyser.connect(this.auditionWet);this.auditionWet.connect(ctx.destination);this.input.connect(this.auditionDry);this.auditionDry.connect(ctx.destination);
     this.inputAnalyser=ctx.createAnalyser();this.inputAnalyser.fftSize=8192;this.input.connect(this.inputAnalyser);
     this.gains=this.tracks.map(()=>{const g=ctx.createGain(),pan=ctx.createStereoPanner(),send=ctx.createGain();g.connect(pan);pan.connect(this.input);pan.connect(send);send.connect(this.echoInput);const analyser=ctx.createAnalyser();analyser.fftSize=8192;pan.connect(analyser);this.trackAnalysers.push(analyser);this.pans.push(pan);this.sends.push(send);return g;});
     this.tape.port.onmessage=({data})=>{if(data.type==='cloud')this.cloudVisual=data;};

@@ -14,12 +14,11 @@ const pass=name=>{checks.push(name);process.stdout.write(`PASS ${name}\n`);};
 function wav(){const sr=24000,frames=sr*3,b=Buffer.alloc(44+frames*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(sr,24);b.writeUInt32LE(sr*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(frames*2,40);for(let i=0;i<frames;i++){const t=i/sr;const s=t<.15?Math.sin(t*Math.PI*440*2)*Math.exp(-t*20)*.5:0;b.writeInt16LE(Math.round(s*32767),44+i*2);}return b;}
 try{
   await page.goto(base);await page.getByText('Saved on this device',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'Show all sound tools',exact:true}).click();
   assert(await page.getByRole('slider',{name:'Dissolve',exact:true}).isVisible());
   assert(!await page.getByLabel('Loop start position',{exact:true}).isVisible(),'Splice editing stays hidden on an empty tape');
   assert.equal(await page.getByRole('button',{name:/Select track [1-4]: Empty tape/}).count(),4);
   await page.screenshot({path:'test-results/desktop.png',fullPage:true});
-  pass('Empty desktop studio with optional sound tools and contextual loop editing');
+  pass('Empty desktop studio with all sound tools and contextual loop editing');
   for(const size of [{width:1440,height:900},{width:1366,height:768},{width:1280,height:800}]){
     await page.setViewportSize(size);
     const cabinet=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scroll:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth,top:document.querySelector('.instrument').getBoundingClientRect().top,panels:['.mechanical-bay','.control-panel','.tape-recorder','.character-rack','.cloud-panel','.master-recorder'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {selector,x:r.x,y:r.y,right:r.right,bottom:r.bottom};})}));
@@ -31,13 +30,14 @@ try{
   const originalTime=await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalFeedback=await page.getByRole('slider',{name:'Feedback',exact:true}).getAttribute('aria-valuenow');
   await page.getByRole('button',{name:'Wander',exact:true}).click();assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Custom');assert.equal(await page.getByRole('slider',{name:'Feedback',exact:true}).getAttribute('aria-valuenow'),originalFeedback);
   await page.getByRole('button',{name:'Return',exact:true}).click();assert.equal(await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),originalTime);assert.equal(await page.getByLabel('Echo preset',{exact:true}).inputValue(),'Warm space');
-  pass('Expanded cabinet has no overlap at three desktop sizes; Wander is reversible');
+  pass('Complete cabinet has no overlap at three desktop sizes; Wander is reversible');
 
   await page.getByRole('button',{name:'Open library for track 1',exact:true}).click();await page.getByRole('button',{name:/Soft keys/}).click();
   await page.getByRole('button',{name:'Open library for track 2',exact:true}).click();await page.getByRole('button',{name:/Dusty drums/}).click();
   await page.getByRole('button',{name:'Select track 1: Soft keys',exact:true}).click();
   await page.getByRole('button',{name:'Play tape',exact:true}).click();await page.waitForTimeout(650);
   const output=await page.locator('.meter-wrap svg').getAttribute('aria-label');assert(!output.includes(' 0 percent'),`Audio must reach meter: ${output}`);
+  await page.waitForTimeout(2600);let sustained=false;for(let i=0;i<8;i++){sustained ||= !(await page.locator('.meter-wrap svg').getAttribute('aria-label')).includes(' 0 percent');await page.waitForTimeout(100);}assert(sustained,'Playback remains audible beyond two seconds');
   pass('Library loads chosen lanes and produces real audio');
   const allocations=await page.evaluate(()=>window.__bufferAllocations);
   await page.getByRole('slider',{name:'Tape playback speed',exact:true}).fill('0.5');await page.waitForTimeout(120);
