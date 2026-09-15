@@ -18,12 +18,6 @@ const energy=a=>a.reduce((n,v)=>n+v*v,0);
 const noSend=signal({mix:1,hiss:0},0);assert(energy(noSend)<1e-10,'A zero echo send produces no echoes');assert(energy(signal({mix:1,hiss:0},1))>.1);
 const clean=signal({mix:0,enabled:0,hiss:0}),worn=signal({mix:0,age:.9,drive:.8,wow:.8,flutter:.8,crinkle:.7,hiss:0});assert(energy(clean.map((v,i)=>v-worn[i]))>1,'Tape character changes the dry source');
 console.log('PASS Independent echo input and audible tape colour on the dry bus');
-const held=new Tape(),hp=parameters();hp.mix[0]=1;hp.wow[0]=hp.flutter[0]=hp.hiss[0]=hp.crinkle[0]=0;
-for(let b=0;b<200;b++){const dry=[new Float32Array(128).fill(.2),new Float32Array(128).fill(.2)];held.process([dry,dry],[[new Float32Array(128),new Float32Array(128)]],hp);}
-held.port.onmessage({data:{hold:true}});let early=0,late=0;
-for(let b=0;b<4000;b++){const out=[new Float32Array(128),new Float32Array(128)];held.process([[],[]],[out],hp);assert(out.every(c=>c.every(Number.isFinite)));if(b>=500&&b<1000)early+=energy(out[0]);if(b>=3500)late+=energy(out[0]);}
-assert(late>early*.65,'Held echo survives after live delay has decayed');held.port.onmessage({data:{clear:true}});assert(!held.hold);assert(held.held.every(c=>c.every(v=>v===0)));
-console.log('PASS Echo hold sustains captured audio and panic releases it');
 const Space=processors['magnetic-space'];
 function room(decay){const room=new Space(),p={decay:new Float32Array([decay]),damping:new Float32Array([.2])};let tail=0;for(let b=0;b<2400;b++){const input=[new Float32Array(128),new Float32Array(128)],out=[new Float32Array(128),new Float32Array(128)];if(b===0)input[0][0]=input[1][0]=.5;room.process([input],[out],p);assert(out.every(c=>c.every(v=>Number.isFinite(v)&&Math.abs(v)<1)));if(b>1900)tail+=energy(out[0])+energy(out[1]);}room.port.onmessage({data:{clear:true}});assert(room.lines.every(c=>c.every(v=>v===0)));return tail;}
 assert(room(18)>room(1)*100,'Long ambient decay preserves more late energy than a short room');console.log('PASS Ambient room decay, bounded output and tail clear');

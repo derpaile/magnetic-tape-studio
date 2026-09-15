@@ -86,22 +86,13 @@ class TapeProcessor extends AudioWorkletProcessor {
   }
   constructor() {
     super();this.size=Math.ceil(sampleRate*4.6);this.tape=[new Float32Array(this.size),new Float32Array(this.size)];
-    this.held=[new Float32Array(this.size),new Float32Array(this.size)];this.heldLength=2;this.heldPos=0;this.hold=false;this.holdMix=0;this.inputCut=false;this.swell=false;this.feed=1;
     this.drySize=Math.ceil(sampleRate*.03);this.dryTape=[new Float32Array(this.drySize),new Float32Array(this.drySize)];this.dryPos=0;this.dryLP=[0,0];
     this.pos=0;this.phase=0;this.delay=.22*sampleRate;this.lp=[0,0];this.dc=[0,0];this.last=[0,0];this.env=0;this.dust=0;this.dustTarget=0;this.dustClock=0;this.seed=7841;
     this.heads=[1,0,1];this.headLevels=[1,0,1];this.wet=[0,0];this.returned=[0,0];this.delays=[.22*sampleRate,.44*sampleRate,.66*sampleRate];this.cloud=new MemoryCloud();this.memoryInput=[0,0];
     this.port.onmessage=({data})=>{
       this.cloud.command(data);
       if(data.heads)this.heads=data.heads;
-      if(data.hold&&!this.hold){
-        this.heldLength=Math.min(this.size-2,Math.max(2,Math.round(Math.max(...this.delays.map((d,i)=>this.heads[i]?d:0)))));this.heldPos=0;
-        for(let c=0;c<2;c++)for(let i=0;i<this.heldLength;i++)this.held[c][i]=this.tape[c][(this.pos-this.heldLength+i+this.size)%this.size];
-        const fade=Math.min(Math.round(sampleRate*.003),Math.floor(this.heldLength/2));for(let c=0;c<2;c++)for(let i=0;i<fade;i++){this.held[c][i]*=i/fade;this.held[c][this.heldLength-1-i]*=i/fade;}
-      }
-      if(typeof data.hold==='boolean')this.hold=data.hold;
-      if(typeof data.inputCut==='boolean')this.inputCut=data.inputCut;
-      if(typeof data.swell==='boolean')this.swell=data.swell;
-      if(data.clear){this.tape.forEach(c=>c.fill(0));this.held.forEach(c=>c.fill(0));this.lp.fill(0);this.dc.fill(0);this.last.fill(0);this.hold=false;this.holdMix=0;this.env=0;}
+      if(data.clear){this.tape.forEach(c=>c.fill(0));this.lp.fill(0);this.dc.fill(0);this.last.fill(0);this.env=0;}
     };
   }
   random(){this.seed=(Math.imul(this.seed,1664525)+1013904223)|0;return (this.seed>>>0)/2147483648-1;}
@@ -111,7 +102,7 @@ class TapeProcessor extends AudioWorkletProcessor {
     const enabled=p.enabled[0],mix=p.mix[0]*enabled,drive=1+p.drive[0]*4.5;
     const cutoff=900+p.tone[0]*11500*(1-p.age[0]*.86),alpha=1-Math.exp(-2*Math.PI*cutoff/sampleRate);
     const dryAlpha=1-Math.exp(-2*Math.PI*(14000-p.age[0]*10000)/sampleRate),hpCoeff=Math.exp(-2*Math.PI*p.lowCut[0]/sampleRate);
-    const targets=[p.time[0]*sampleRate,p.head2[0]*sampleRate,p.head3[0]*sampleRate],feedback=this.swell?1.065:p.feedback[0],spread=p.spread[0];
+    const targets=[p.time[0]*sampleRate,p.head2[0]*sampleRate,p.head3[0]*sampleRate],feedback=p.feedback[0],spread=p.spread[0];
     const slew=1-Math.exp(-1/(sampleRate*.16)),smooth=1-Math.exp(-1/(sampleRate*.015));
     const dryLevel=Math.cos(mix*Math.PI/2),wetLevel=Math.sin(mix*Math.PI/2),bias=p.drive[0]*.12,biasDC=Math.tanh(bias);
     const wowDepth=.0025*p.wow[0]*sampleRate,flutterDepth=.00045*p.flutter[0]*sampleRate,crinkleDepth=.003*p.crinkle[0]*sampleRate;
@@ -125,8 +116,6 @@ class TapeProcessor extends AudioWorkletProcessor {
       const flutter=Math.sin(this.phase*2*Math.PI*7.13)+.3*Math.sin(this.phase*2*Math.PI*13.7);
       const movement=wow*wowDepth+flutter*flutterDepth+this.dust*crinkleDepth;
       const wear=1-this.dust*p.crinkle[0]*1.1;
-      this.holdMix+=((this.hold?1:0)-this.holdMix)*smooth;
-      this.feed+=((this.inputCut||this.hold?0:1)-this.feed)*smooth;
       let total=0;for(let h=0;h<3;h++){this.headLevels[h]+=(this.heads[h]-this.headLevels[h])*smooth;total+=this.headLevels[h];}total=Math.max(1,total);
       for(let c=0;c<2;c++){
         let wet=0,returned=0;
@@ -141,21 +130,20 @@ class TapeProcessor extends AudioWorkletProcessor {
         const dry=input[c]?.[i]??input[0]?.[i]??0,sent=send[c]?.[i]??send[0]?.[i]??0;
         const returned=this.returned[c]*(1-spread*.42)+this.returned[1-c]*spread*.42;
         this.lp[c]+=alpha*(returned-this.lp[c]);const hp=this.lp[c]-this.last[c]+hpCoeff*this.dc[c];this.last[c]=this.lp[c];this.dc[c]=hp;
-        const held=this.held[c][this.heldPos],noise=this.random()*p.hiss[0]*.012*Math.min(1,this.env*8);
-        const written=sent*.7*this.feed+hp*feedback+held*this.holdMix*.12+this.cloud.output[c]*cloudReturn;
+        const noise=this.random()*p.hiss[0]*.012*Math.min(1,this.env*8);
+        const written=sent*.7+hp*feedback+this.cloud.output[c]*cloudReturn;
         this.tape[c][this.pos]=Math.tanh(written*drive)/drive*wear+noise*.3;
         this.dryTape[c][this.dryPos]=dry;
         const magnetic=this.read(this.dryTape[c],this.dryPos-sampleRate*.006-movement,this.drySize);
         const saturated=(Math.tanh(magnetic*drive+bias)-biasDC)/drive;
         this.dryLP[c]+=dryAlpha*(saturated-this.dryLP[c]);
         const tapeDry=(this.dryLP[c]*.8+magnetic*.2)*wear+noise;
-        const wet=this.wet[c]*(1-this.holdMix)+held*this.holdMix;
-        const tapeOut=(dry*(1-enabled)+tapeDry*enabled)*dryLevel+wet*wetLevel;
+        const tapeOut=(dry*(1-enabled)+tapeDry*enabled)*dryLevel+this.wet[c]*wetLevel;
         this.memoryInput[c]=tapeOut;
         out[c][i]=tapeOut*tapeLevel+this.cloud.output[c]*cloudLevel;
       }
       this.cloud.process(this.memoryInput[0],this.memoryInput[1]);
-      this.pos=(this.pos+1)%this.size;this.dryPos=(this.dryPos+1)%this.drySize;this.heldPos=(this.heldPos+1)%this.heldLength;
+      this.pos=(this.pos+1)%this.size;this.dryPos=(this.dryPos+1)%this.drySize;
     }this.cloud.report(this.port);return true;
   }
 }

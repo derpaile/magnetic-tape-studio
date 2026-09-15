@@ -54,13 +54,12 @@ try{
   await page.getByRole('button',{name:'Head 1 tempo sync',exact:true}).click();await page.getByLabel('Tempo',{exact:true}).fill('120');await page.getByLabel('Tempo',{exact:true}).press('Enter');
   await page.getByLabel('Head 1 note division',{exact:true}).selectOption('1/8 D');assert.equal(await page.getByRole('slider',{name:'Head 1 time',exact:true}).getAttribute('aria-valuenow'),'0.375');
   await page.getByRole('slider',{name:'Head 1 time',exact:true}).focus();await page.keyboard.press('ArrowUp');assert.equal(await page.getByRole('button',{name:'Head 1 free time',exact:true}).getAttribute('aria-pressed'),'true');
-  const swell=page.getByRole('button',{name:'Feedback swell',exact:true});await swell.focus();await page.keyboard.down('Space');assert.equal(await swell.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await swell.getAttribute('aria-pressed'),'false');
+  assert.equal(await page.locator('.performance-strip').count(),0);
   const brake=page.getByRole('button',{name:'Tape brake',exact:true});await brake.focus();await page.keyboard.down('Enter');await page.waitForTimeout(150);assert.equal(await brake.getAttribute('aria-pressed'),'true');await page.keyboard.up('Enter');assert.equal(await brake.getAttribute('aria-pressed'),'false');
-  await page.getByRole('button',{name:'Echo hold',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'true');await page.getByRole('button',{name:'Clear echo',exact:true}).click();assert.equal(await page.getByRole('button',{name:'Echo hold',exact:true}).getAttribute('aria-pressed'),'false');
   const send=page.getByRole('slider',{name:'Selected track echo send',exact:true});await send.fill('0.2');
   const throwButton=page.getByRole('button',{name:'Dub throw',exact:true});await throwButton.focus();await page.keyboard.down('Space');assert.equal(await throwButton.getAttribute('aria-pressed'),'true');await page.keyboard.up('Space');assert.equal(await send.inputValue(),'0.2');
   await page.getByLabel('Selected track playback mode',{exact:true}).selectOption('tape');await page.getByRole('button',{name:'Full tape loop',exact:true}).click();await send.fill('1');
-  pass('Own track loop uses native A–B timing; head knobs, tempo sync, brake, swell, hold and dub throw work');
+  pass('Own track loop uses native A–B timing; head knobs, tempo sync, brake and dub throw work; performance area is removed');
   await page.getByRole('button',{name:'Record master',exact:true}).click();await page.waitForTimeout(500);
   const heldHead2=await page.getByRole('slider',{name:'Head 2 time',exact:true}).getAttribute('aria-valuenow');
   await page.getByRole('slider',{name:'Head 3 time',exact:true}).focus();await page.keyboard.press('ArrowUp');

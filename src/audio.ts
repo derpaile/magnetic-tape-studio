@@ -72,7 +72,7 @@ export class TapeEngine {
   headTiming:HeadTiming[] = [{time:.44,sync:false,division:'1/4'},{time:.66,sync:false,division:'1/4 D'}];
   cloud:CloudParameters = {...CLOUD_DEFAULTS}; cloudHolding=false;
   cloudVisual:CloudVisual = {peaks:[],grains:[],filled:0,hold:false,motion:'idle',motionDuration:0,values:Object.values(CLOUD_DEFAULTS)};
-  holding=false; inputCut=false; swelling=false; braking=false; throwing=-1; private motorSpeed=1; private tapeOrigin=0; private taps:number[]=[];
+  braking=false; throwing=-1; private motorSpeed=1; private tapeOrigin=0; private taps:number[]=[];
   playing=false; recording=false; masterSaving=false; micRecording=false; micArming=false; monitoring=false; overdub=false;
   micTrack:number|null=null; micLive=false; micDeviceId=''; micChannel:'mono'|'left'|'right'|'stereo'='mono'; micGainDb=0; micCountIn=false; micDeviceLabel='Default microphone'; micProblem='';
   micAnalyser:AnalyserNode|null=null; micRawAnalyser:AnalyserNode|null=null;
@@ -184,7 +184,7 @@ export class TapeEngine {
     for(const [key,value] of Object.entries(this.params))(this.tape.parameters as unknown as Map<string,AudioParam>).get(key)?.setTargetAtTime(value,at,.025);
     for(const [key,value] of [...Object.entries(this.cloud),['head2',this.headTiming[0].time],['head3',this.headTiming[1].time]] as [string,number][])(this.tape.parameters as unknown as Map<string,AudioParam>).get(key)?.setTargetAtTime(value,at,.035);
     (this.tape.parameters as unknown as Map<string,AudioParam>).get('enabled')!.setTargetAtTime(this.enabled?1:0,at,.015);
-    this.tape.port.postMessage({heads:this.heads.map(Number),hold:this.holding,inputCut:this.inputCut,swell:this.swelling,cloudHold:this.cloudHolding});
+    this.tape.port.postMessage({heads:this.heads.map(Number),cloudHold:this.cloudHolding});
     (this.spaceNode.parameters as unknown as Map<string,AudioParam>).get('decay')!.setTargetAtTime(this.params.decay,at,.08);
     (this.spaceNode.parameters as unknown as Map<string,AudioParam>).get('damping')!.setTargetAtTime(this.params.age,at,.08);
     this.reverbGain.gain.setTargetAtTime(this.enabled?this.params.reverb*.65:0,at,.03);
@@ -192,10 +192,9 @@ export class TapeEngine {
     this.master.gain.setTargetAtTime(this.params.volume,at,.02);
   }
   updateGains(){if(!this.ctx)return;const anySolo=this.tracks.some(t=>t.solo),at=this.ctx.currentTime;this.tracks.forEach((t,i)=>{this.gains[i]?.gain.setTargetAtTime(t.muted||(anySolo&&!t.solo)?0:t.volume,at,.015);this.sends[i]?.gain.setTargetAtTime(this.throwing===i?1:t.send,at,.01);this.pans[i]?.pan.setTargetAtTime(t.pan,at,.02);});}
-  setPerformance(key:'holding'|'inputCut'|'swelling',value:boolean){this[key]=value;this.updateParams();this.onChange();}
   throwEcho(i:number,active:boolean){this.throwing=active?i:-1;this.updateGains();this.onChange();}
   brake(active:boolean){if(this.micRecording||this.braking===active)return;this.braking=active;this.rampSpeed(active?.025:this.speed,active?.8:.45);this.onChange();}
-  releasePerformance(){this.swelling=false;this.throwing=-1;this.brake(false);this.updateParams();this.updateGains();this.onChange();}
+  releaseMomentaries(){this.throwing=-1;this.brake(false);this.updateGains();this.onChange();}
   private buffer(t:Track){
     const clip=t.clip!,{start,end}=this.loopBounds(this.tracks.indexOf(t));
     const duration=t.mode==='tape'?this.duration:clip.channels[0].length/clip.sampleRate;
@@ -467,6 +466,6 @@ export class TapeEngine {
     if(value&&!this.micStream)await this.activateMic(index);
     this.monitoring=value;this.applyMicSettings();this.onChange();
   }
-  panic(){this.holding=false;this.cloudHolding=false;this.inputCut=false;this.releasePerformance();this.setParam('feedback',.25);this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}this.onNotice('Echo, cloud and reverb cleared. Feedback reset.');}
+  clearEffects(){this.cloudHolding=false;this.releaseMomentaries();this.tape?.port.postMessage({clear:true});this.spaceNode?.port.postMessage({clear:true});if(this.spring){const impulse=this.spring.buffer;this.spring.buffer=null;this.spring.buffer=impulse;}}
   async bounce(index:number){const take=this.takes[0];if(!take)return;await this.importFile(new File([await this.takeWav(take)],`${take.name} bounce.wav`,{type:'audio/wav'}),index);}
 }

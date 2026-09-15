@@ -6,7 +6,7 @@ A four-track instrument for layering audio, shaping tape echoes and recording th
 
 1. **Play starter mix** loads four balanced original sounds onto an empty tape and starts playback at 96 BPM. Alternatively, use the sound library, import audio, drop a file directly onto a lane, or record a microphone.
 2. Select a track to adjust its pan and echo send. Use **Follow tape**, **Own loop · A–B**, or **One shot**. The splice editor appears when Own loop is selected. Turning the lane loop off returns it to Follow tape.
-3. Choose an echo preset. Adjust the independent playback heads, feedback, echo mix and reverb. **More sound tools** reveals tape wear and granular memory; closing it does not alter the sound. Presets reset granular settings and release performance holds, so the preset has a predictable starting sound.
+3. Choose an echo preset. Adjust the independent playback heads, feedback, echo mix, tape wear, reverb and granular memory. All sound tools stay visible.
 4. **Record master** captures the current output. **Record from start** rewinds, starts recording, and plays the tape. **Stop & save take** finishes immediately; **Finish with tail** pauses the tape, captures the decay and saves automatically.
 5. Export a take as WAV, FLAC or M4A. Rename, preview, or copy it back onto a track. Deleted takes can be restored with **Undo delete** until the page is closed or another session is opened.
 
@@ -27,7 +27,7 @@ Backups move between browsers and devices. Microphone devices are local settings
 - Four stereo tracks with level, mute, solo, pan, post-fader echo send, reverse, variable speed and eight track-edit undo steps. Dub throw temporarily raises one track's send to 100%.
 - Follow tape tracks repeat when Full tape loop is enabled; independent A–B loops repeat on their own. One shots finish even with the global loop on. Beat lengths refer to source time at 1× speed.
 - Three independently timed playback heads, each with free time or tempo sync, straight/dotted/triplet divisions and pitch bending when time changes. Tape saturation, age, wow, flutter, crinkle and signal-following hiss. Separate spring-inspired and diffuse ambient reverbs.
-- Feedback swell and Tape brake are momentary controls. Echo hold captures repeating echoes; Send cut stops new echo input. Clear echo empties echoes, granular memory and reverb, releases holds and resets feedback.
+- Tape brake and per-track Dub throw are momentary controls.
 - Granular memory listens to the last 12 seconds. Dissolve, Grain size, Look back, Scatter, Memory wander and Back to tape shape fragments of that sound. Hold moment freezes the memory. Record motion captures those six knobs for up to 16 seconds and loops them on the audio clock.
 - Live microphone input with device/channel choice, ±24 dB gain and a four-beat count-in. Optional monitoring follows the assigned track's level, pan, mute, solo and send. Use headphones. Mic recordings stay dry; master recordings include effects. Overdub layers onto existing tape. Mic access and monitoring never restart automatically after reload.
 - Tape, Spectrum and History share the reel window. Analysis can show the input, selected track before effects, or master after effects. Freeze and Reference aid comparison. A/B auditions the original mix at measured RMS matching, bounded to ±12 dB; disabled during master capture. Analysis uses the mono sum, a logarithmic frequency axis and a fixed −96 to 0 dBFS scale.
@@ -43,7 +43,7 @@ Tape and spring character are creative approximations, not a circuit-accurate ha
 
 ## Keyboard
 
-Space: play/pause. R: master record/stop. L: selected track loop. Shift+L: full tape loop. T: tap tempo. H: echo hold. B: effects bypass. 1–4: select track. Escape: clear echo. Knobs support arrows, Home/End, Shift for finer adjustments, drag, and double-click reset. Focus a waveform to seek with arrows or Home/End. Space/Enter operates focused buttons. Repeated key events do not repeatedly toggle recording.
+Space: play/pause. R: master record/stop. L: selected track loop. Shift+L: full tape loop. T: tap tempo. B: effects bypass. 1–4: select track. Knobs support arrows, Home/End, Shift for finer adjustments, drag, and double-click reset. Focus a waveform to seek with arrows or Home/End. Space/Enter operates focused buttons. Repeated key events do not repeatedly toggle recording.
 
 ## Run, verify and manually release
 
